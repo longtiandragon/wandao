@@ -57,35 +57,34 @@
 
 ## 🖼️ 界面预览
 
-<p align="center">
-  <img src="docs/images/wandao-home.png" alt="万能导桌面端首页" width="920">
-</p>
-<p align="center"><sub>首页：选择平台、开始新任务或继续最近任务</sub></p>
-
 <table>
   <tr>
+    <td width="50%" align="center">
+      <img src="docs/images/wandao-home.png" alt="万能导桌面端首页" width="100%"><br>
+      <sub>首页：选择平台、开始新任务或继续最近任务</sub>
+    </td>
     <td width="50%" align="center">
       <img src="docs/images/wandao-platform-center.png" alt="万能导平台中心界面" width="100%"><br>
       <sub>平台中心：浏览已接入平台并选择导入、导出或教程</sub>
     </td>
+  </tr>
+  <tr>
     <td width="50%" align="center">
       <img src="docs/images/wandao-task-center.png" alt="万能导任务中心界面" width="100%"><br>
       <sub>任务中心：查看历史进度、失败原因并继续任务</sub>
     </td>
-  </tr>
-  <tr>
     <td width="50%" align="center">
       <img src="docs/images/wandao-tutorials.png" alt="万能导教程公告界面" width="100%"><br>
       <sub>教程公告：在应用内阅读最新公告和使用教程</sub>
     </td>
+  </tr>
+  <tr>
     <td width="50%" align="center">
       <img src="docs/images/wandao-plugin-center.png" alt="万能导插件中心界面" width="100%"><br>
       <sub>插件中心：搜索、安装和更新需要的平台插件</sub>
     </td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center">
-      <img src="docs/images/wandao-settings.png" alt="万能导设置界面" width="49%"><br>
+    <td width="50%" align="center">
+      <img src="docs/images/wandao-settings.png" alt="万能导设置界面" width="100%"><br>
       <sub>设置：选择自动化浏览器、显示模式并检查版本</sub>
     </td>
   </tr>
