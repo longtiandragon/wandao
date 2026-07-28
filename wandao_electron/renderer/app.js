@@ -21,7 +21,7 @@ let pluginBulkUpdateRunning = false;
 let customPluginMessageCleanup = null;
 const FALLBACK_NOTICE_CENTER = {
   version: 1,
-  updatedAt: '2026-07-08',
+  updatedAt: '2026-07-28',
   repository: GITHUB_REPO_URL,
   items: [
     {
@@ -38,12 +38,13 @@ const FALLBACK_NOTICE_CENTER = {
     },
     {
       id: 'project-learning-ai-prompt',
-      type: 'tutorial',
+      type: 'announcement',
       pinned: false,
       title: 'AI 辅助学习：项目学习导师提示词',
       summary: '把导出的教学文档和源码放在一起，让 AI 像项目学习导师一样带你理解业务流程、核心代码和技术取舍。',
-      date: '2026-07-08',
-      tags: ['教程', 'AI', '项目学习', '提示词'],
+      date: '2026-07-28',
+      badge: 'AI 学习',
+      tags: ['公告', 'AI', '项目学习', '提示词'],
       path: 'prompts/项目学习导师提示词.md',
       body: '# AI 辅助学习：项目学习导师提示词\n\n把万能导导出的教学文档和源码项目放在一起，再把项目学习导师提示词发给 AI，可以让 AI 结合真实代码和课程资料讲解项目。\n\n## 使用方式\n\n1. 用万能导导出你有权限访问的教学文档。\n2. 把 Markdown 文档放到源码项目旁边。\n3. 用 AI 编程工具打开整个项目目录。\n4. 复制 `prompts/项目学习导师提示词.md` 的内容给 AI。\n5. 按章节、功能或技术点继续提问。'
     }
@@ -350,7 +351,9 @@ function refreshProviderTools() {
 const ERROR_RULES = [
   {
     category: '本地文件路径问题',
-    pattern: /(ENOENT|no such file|can't open file|系统找不到|路径不存在|目录不存在|文件不存在|无法找到|not found|EACCES|EPERM)/i,
+    // 裸 not found / 无法找到 会把平台 404 和"Chrome executable was not found"
+    // 一起吞进来，排查方向完全反了，这里收紧成明确指向本地文件系统的写法。
+    pattern: /(ENOENT|EACCES|EPERM|EISDIR|ENOTDIR|no such file(?: or directory)?|no such directory|can't open file|file not found|path not found|directory not found|系统找不到|路径不存在|目录不存在|文件不存在|无法找到[^。\n]{0,6}(?:插件|脚本|文件|目录|路径))/i,
     title: '本地文件或目录有问题',
     suggestion: '请检查输入目录、输出目录或脚本文件是否存在，路径里不要包含已经被移动或删除的文件。'
   },
@@ -367,6 +370,12 @@ const ERROR_RULES = [
     suggestion: '正文可能已导出，但这些图片没有成功本地化。请检查网络、重新登录后重试，或确认原文图片在浏览器中可以打开。'
   },
   {
+    category: '远端内容不存在',
+    pattern: /(\b404\b|(?:页面|内容|文档|笔记|帖子|主题|资源)不存在|文档已删除|已被删除|invalid[^。\n]{0,16}node_token|node_token[^。\n]{0,16}(?:invalid|不存在)|无效的[^。\n]{0,8}链接)/i,
+    title: '目标平台上找不到这个内容',
+    suggestion: '链接可能填错、内容已被删除或迁移，也可能当前账号看不到它。请在浏览器打开同一个链接确认后重试。'
+  },
+  {
     category: '未登录或登录失效',
     pattern: /(未登录|登录失效|登录已失效|重新登录|登录凭证|没有可用.*凭证|没有可用.*cookie|cookie 中缺少|login required|please login|auth file|cookie|cookies|401|unauthorized|会话|凭证.*失效)/i,
     title: '登录状态可能已失效',
@@ -379,9 +388,36 @@ const ERROR_RULES = [
     suggestion: '请到“设置 > 自动化浏览器”检测并选择 Chrome、Edge 或 Chromium；如果浏览器已打开但仍失败，请关闭后重试。'
   },
   {
+    category: '网络连接失败',
+    pattern: /(ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|connection refused|connection reset|Connection aborted|远程主机强迫关闭)/i,
+    title: '无法连接到目标平台',
+    suggestion: '请检查本机网络、VPN 或代理是否正常，确认能在浏览器打开目标站点后重试。'
+  },
+  {
+    category: '网络超时',
+    pattern: /(ETIMEDOUT|ESOCKETTIMEDOUT|Read timed out|ReadTimeout|ConnectTimeout|timed out|Timeout \d+ms exceeded|TimeoutError|请求超时)/i,
+    title: '请求超时',
+    suggestion: '目标平台响应过慢或网络不稳定。请稍后重试；如果是导入任务，可在高级选项里调大“接口超时秒”和“图片上传超时秒”。'
+  },
+  {
+    category: 'DNS 解析失败',
+    pattern: /(ENOTFOUND|EAI_AGAIN|getaddrinfo|Name or service not known|NameResolutionError|域名解析)/i,
+    title: '域名解析失败',
+    suggestion: '本机 DNS 无法解析目标域名。请检查网络连接、更换 DNS，或确认链接里的域名拼写正确。'
+  },
+  {
+    category: 'HTTPS 证书或代理问题',
+    pattern: /(SSLError|SSLCertVerificationError|CERTIFICATE_VERIFY_FAILED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|self signed certificate|ProxyError|ERR_PROXY|TunnelError|HTTP 407|Proxy Authentication Required)/i,
+    title: 'HTTPS 证书或代理校验失败',
+    suggestion: '通常是公司网络代理或安全软件在中间拦截。请暂时关闭代理/抓包工具，或把目标域名加入直连白名单后重试。'
+  },
+  {
     category: '目标平台 API 权限不足',
-    pattern: /(scope|required scope|scopes required|OpenAPI|API 权限|应用身份权限|drive:|docx:|docs:|wiki:|tenant_access_token|app ticket|99991672|权限申请)/i,
-    title: '目标平台 API 权限不足',
+    // 裸 scope 会命中 argparse 的 --group-scope/--follow-link-scope，裸 docs:/drive:
+    // 会命中日志里的 "docs: 12"，所以 scope 必须与 required/missing 同现，飞书 scope
+    // 收紧成"域:资源[:动作]"（与 extractFeishuScopes 的口径一致）。
+    pattern: /(required scopes?|scopes? required|missing scopes?|应用身份权限|API 权限|权限申请|tenant_access_token|app ticket|99991672|\b(?:drive|docx|docs|wiki|sheets|base):[a-z_][a-z0-9_.]*(?::[a-z0-9_.]+)?)/i,
+    title: '当前应用还没有拿到这个接口的授权',
     suggestion: '请按页面提示开通所需 API 权限，并在平台开放后台发布应用新版本后重试。'
   },
   {
@@ -399,7 +435,7 @@ const ERROR_RULES = [
   {
     category: '请求过快或平台限流',
     pattern: /(rate limit|Too Many Requests|HTTP 429|请求过快|请求频率|频率过高|限流|rateLimited|too frequent)/i,
-    title: '请求过快或平台限流',
+    title: '短时间内请求太多，被平台临时拦截',
     suggestion: '请调大请求延迟和随机浮动，等待一段时间后再继续，必要时使用增量模式补齐缺失内容。'
   },
   {
@@ -411,7 +447,7 @@ const ERROR_RULES = [
   {
     category: '页面结构变化',
     pattern: /(selector|querySelector|Cannot read properties|页面结构|目录条目|找不到元素|未找到按钮|无法定位|DOM|XPath|element not found)/i,
-    title: '页面结构可能变化',
+    title: '自动化没有在页面上找到预期的元素',
     suggestion: '平台页面可能改版，自动化没有找到对应按钮或正文区域。请复制错误报告给开发者适配。'
   },
   {
@@ -692,10 +728,26 @@ function classifyError(message) {
   };
 }
 
+// main.js 的 outputWithOmissionNotice() 会在超长输出最前面拼
+// "[前部 N 个字符已省略，以下为输出尾部]"，真正的 "XxxError: 原因" 永远在末尾，
+// 因此摘要必须从尾部抓最后一条异常行，不能 slice(0, 220) 取开头。
+function extractErrorSummary(raw, maxLength = 220) {
+  const text = String(raw || '').replace(/^\[前部 \d+ 个字符已省略[^\]]*\]\r?\n?/, '');
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const exceptionLine = /^[\w.]*(?:Error|Exception|Failure)\s*:\s*\S/;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!exceptionLine.test(lines[i])) continue;
+    const tail = lines.slice(i).join(' ').replace(/\s+/g, ' ').trim();
+    return tail.length > maxLength ? `${tail.slice(0, maxLength)}...` : tail;
+  }
+  const last = lines.slice(-3).join(' ').replace(/\s+/g, ' ').trim();
+  return last.length > maxLength ? `...${last.slice(-maxLength)}` : last;
+}
+
 function formatUserError(message) {
   const raw = normalizeLogMessage(message);
   const rule = classifyError(raw);
-  const summary = compactLogSummary(raw);
+  const summary = extractErrorSummary(raw);
   const suffix = summary ? `\n原始摘要：${summary}` : '';
   return `${rule.category}：${rule.title}。${rule.suggestion}${suffix}`;
 }
@@ -747,6 +799,34 @@ function maskSensitiveValue(value) {
   return typeof value === 'string' ? maskSensitiveText(value) : value;
 }
 
+function maskDiagnosticArgs(args) {
+  const maskArgs = window.WandaoTaskReport?.maskArgs;
+  const masked = typeof maskArgs === 'function'
+    ? maskArgs(Array.isArray(args) ? args : [])
+    : (Array.isArray(args) ? args : []);
+  return maskSensitiveValue(masked);
+}
+
+function stringifyDiagnosticData(value) {
+  if (value === undefined || value === null) return '';
+  try {
+    return JSON.stringify(maskSensitiveValue(value));
+  } catch (error) {
+    return JSON.stringify({
+      serializationError: formatError(error),
+      valueType: typeof value
+    });
+  }
+}
+
+function formatDeveloperDetailEntry(entry) {
+  const event = entry.event ? ` [${entry.event}]` : '';
+  const provider = entry.provider ? ` [provider:${entry.provider}]` : '';
+  const data = stringifyDiagnosticData(entry.data);
+  const suffix = data ? ` | data=${data}` : '';
+  return `[${formatUserDateTime(entry.time)}] [${entry.source}] [${entry.type}]${event}${provider} ${entry.message}${suffix}`;
+}
+
 function activeToolLabel() {
   const active = document.querySelector('.nav-item.active');
   return active?.textContent?.trim() || TOOLS[currentTool]?.title || currentTool || '未知功能';
@@ -771,7 +851,7 @@ async function copyDeveloperReport() {
   }
 
   const userLines = userLogEntries.map((entry) => `[${formatUserDateTime(entry.time)}] [${entry.type}] ${entry.message}`);
-  const detailLines = detailLogEntries.map((entry) => `[${formatUserDateTime(entry.time)}] [${entry.source}] [${entry.type}] ${entry.message}`);
+  const detailLines = detailLogEntries.map(formatDeveloperDetailEntry);
   const report = [
     '# 万能导错误报告',
     '',
@@ -1445,11 +1525,29 @@ async function runTrackedPythonCommand(script, args, context = {}, options = {})
     }
   }
   const jobId = context.jobId || makeTaskId();
+  const runtimeStartedAt = Date.now();
   const commandArgs = Array.isArray(args) ? [...args] : [];
   if (commandArgs.includes('--checkpoint-file') && !commandArgs.includes('--checkpoint-task-id')) {
     commandArgs.push('--checkpoint-task-id', jobId);
   }
   const task = startHistoryTask(script, commandArgs, { ...context, jobId });
+  const providerId = context.providerId || currentTool;
+  const runtimeContext = {
+    taskId: task?.id || '',
+    runId: task?.runId || '',
+    jobId: task?.jobId || jobId,
+    parentRunId: task?.parentRunId || context.parentRunId || '',
+    providerId,
+    pluginVersion: TOOLS[providerId]?.pluginVersion || '',
+    action: context.action || '',
+    script,
+    args: maskDiagnosticArgs(commandArgs)
+  };
+  appendDetailedLog('runtime', 'info', `启动任务：${context.title || script}`, {
+    event: 'runtime.command.started',
+    provider: providerId,
+    data: runtimeContext
+  });
   try {
     const result = await window.electronAPI.runPythonCommand(script, commandArgs, {
       ...options,
@@ -1457,12 +1555,35 @@ async function runTrackedPythonCommand(script, args, context = {}, options = {})
       runId: task?.runId || '',
       jobId: task?.jobId || jobId,
       parentRunId: task?.parentRunId || '',
-      providerId: context.providerId || currentTool
+      providerId
     });
     recordPythonResultDiagnostics(script, result);
+    appendDetailedLog('runtime', result?.success ? 'success' : (isStoppedResult(result) ? 'warn' : 'error'), `任务进程结束：${context.title || script}`, {
+      event: 'runtime.command.finished',
+      provider: providerId,
+      data: {
+        ...runtimeContext,
+        elapsedMs: Date.now() - runtimeStartedAt,
+        success: Boolean(result?.success),
+        stopped: isStoppedResult(result),
+        code: result?.code ?? 0,
+        legacyResult: Boolean(result?.legacyResult),
+        error: result?.error ? compactDiagnostic(result.error, 1600) : ''
+      }
+    });
     await finishHistoryTask(task, result);
     return result;
   } catch (error) {
+    appendDetailedLog('runtime', 'error', `任务调用异常：${context.title || script}`, {
+      event: 'runtime.command.exception',
+      provider: providerId,
+      data: {
+        ...runtimeContext,
+        elapsedMs: Date.now() - runtimeStartedAt,
+        error: formatError(error),
+        stack: error?.stack || ''
+      }
+    });
     await finishHistoryTask(task, null, error);
     throw error;
   }
@@ -1827,14 +1948,14 @@ async function loadProviderManifests() {
   if (!window.electronAPI.getProviderManifests || !PROVIDER_REGISTRY?.replaceExternal) return;
   const result = await window.electronAPI.getProviderManifests();
   if (!result?.success) {
-    log(`加载社区 provider 失败：${result?.error || '未知错误'}`, 'error');
+    log(`加载社区平台插件失败：${result?.error || '未知错误'}`, 'error');
     return;
   }
   const manifests = Array.isArray(result.providers) ? result.providers : [];
   const manifestErrors = Array.isArray(result.errors) ? result.errors : [];
   manifestErrors.forEach((message) => appendDetailedLog('provider', 'error', message));
   if (manifestErrors.length) {
-    appendUserLog(`有 ${manifestErrors.length} 个本地 Provider 配置无效，已安全忽略。详情请查看详细日志。`, 'warn');
+    appendUserLog(`有 ${manifestErrors.length} 个本地平台配置无效，已安全忽略。详情请查看详细日志。`, 'warn');
   }
   PROVIDER_REGISTRY.replaceExternal(manifests);
   refreshProviderTools();
@@ -1857,7 +1978,7 @@ function renderProviderSafetyNotice(provider) {
   return `
     <div class="info-box provider-safety-notice">
       <strong>${escapeHtml(title)}</strong>
-      <p>这个 Provider 来自${escapeHtml(source)}，执行动作时会在本机运行脚本。请确认来源可信，不要运行陌生人提供的未知脚本。</p>
+      <p>这个平台插件来自${escapeHtml(source)}，执行动作时会在本机运行脚本。请确认来源可信，不要运行陌生人提供的未知脚本。</p>
     </div>
   `;
 }
@@ -3354,7 +3475,7 @@ function renderRequirements(provider) {
   return `
     <div class="requirements-card">
       <strong>运行依赖</strong>
-      <p>这个 provider 声明了额外依赖。正式执行前请确认本机环境已满足；万能导不会自动安装社区插件依赖。</p>
+      <p>这个平台插件声明了额外依赖。正式执行前请确认本机环境已满足；万能导不会自动安装社区插件依赖。</p>
       <ul>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
     </div>
   `;
@@ -3372,7 +3493,7 @@ async function hydrateGuideImages(container, providerId) {
     const imagePath = image.dataset.guideImage || '';
     try {
       const result = await window.electronAPI.readProviderGuideImage(providerId, imagePath);
-      if (!result?.success || !result.dataUrl) throw new Error(result?.error || '????????');
+      if (!result?.success || !result.dataUrl) throw new Error(result?.error || '教程图片读取失败');
       image.src = result.dataUrl;
       image.removeAttribute('data-guide-image');
     } catch (error) {
@@ -3411,7 +3532,7 @@ function renderGuideProvider(provider) {
     provider.capabilities?.tree ? '支持目录结构' : '',
     provider.capabilities?.batch ? '支持批量' : ''
   ].filter(Boolean);
-  const guide = provider.guideMarkdown || '# 暂无教程\n\n这个 provider 还没有提供 README.md。';
+  const guide = provider.guideMarkdown || '# 暂无教程\n\n这个平台还没有提供教程文档。';
   contentArea.innerHTML = `
     <div class="guide-panel">
       <section class="provider-overview-card">
@@ -3810,7 +3931,7 @@ function initializeManifestProviderHandlers(provider, actions, fields) {
       }
       const script = action.script || provider.script;
       if (!script) {
-        alert('这个动作没有配置脚本，可能只是教程型 provider。');
+        alert('这个动作没有配置脚本，可能只是纯教程型平台。');
         return;
       }
       let args;
@@ -3831,7 +3952,7 @@ function initializeManifestProviderHandlers(provider, actions, fields) {
         loginDoneButton.disabled = false;
         loginDoneButton.textContent = '我已完成登录，保存凭证';
       }
-      startProgress(action.progressTitle || action.label || provider.title, action.progressDetail || '正在执行 provider 动作...');
+      startProgress(action.progressTitle || action.label || provider.title, action.progressDetail || '正在执行平台动作...');
       log(`开始：${action.label || provider.title}`, 'info');
       try {
         const result = await runProviderCommand(script, args, {
@@ -4141,7 +4262,7 @@ function switchTool(toolId) {
 
   const config = TOOLS[currentTool];
   if (!config) {
-    log(`未找到平台 provider：${currentTool}`, 'error');
+    log(`未找到这个平台：${currentTool}`, 'error');
     switchTool(DEFAULT_VIEW_ID);
     return;
   }
@@ -4403,6 +4524,35 @@ function formatError(error) {
   return error.error || error.message || JSON.stringify(error);
 }
 
+let rendererDiagnosticsInitialized = false;
+
+function initializeRendererDiagnostics() {
+  if (rendererDiagnosticsInitialized) return;
+  rendererDiagnosticsInitialized = true;
+  window.addEventListener('error', (event) => {
+    appendDetailedLog('renderer', 'error', '前端发生未处理异常', {
+      event: 'renderer.unhandled-error',
+      data: {
+        message: event.message || formatError(event.error),
+        source: event.filename || '',
+        line: event.lineno || 0,
+        column: event.colno || 0,
+        stack: event.error?.stack || ''
+      }
+    });
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    appendDetailedLog('renderer', 'error', '前端 Promise 发生未处理异常', {
+      event: 'renderer.unhandled-rejection',
+      data: {
+        message: formatError(reason),
+        stack: reason?.stack || ''
+      }
+    });
+  });
+}
+
 function compactDiagnostic(value, maxLength = 420) {
   const text = normalizeLogMessage(value)
     .replace(/\s+/g, ' ')
@@ -4555,7 +4705,7 @@ async function saveImaConfig(prefix) {
   log(`开始：${title}`, 'info');
   try {
     const provider = TOOLS[prefix];
-    if (!provider?.script) throw new Error(`ima Provider 未提供脚本：${prefix}`);
+    if (!provider?.script) throw new Error(`ima 平台未提供脚本：${prefix}`);
     const result = await runProviderCommand(provider.script, args, {
       providerId: prefix,
       title,
@@ -4692,7 +4842,7 @@ async function runImaImportCommand(args, title, detail = '正在处理 ima 知�
   log(`开始：${title}`, 'info');
   try {
     const provider = TOOLS['ima-import'];
-    if (!provider?.script) throw new Error('ima 导入 Provider 未提供脚本');
+    if (!provider?.script) throw new Error('ima 导入未提供脚本');
     const result = await runProviderCommand(provider.script, args, {
       providerId: 'ima-import',
       title,
@@ -4998,7 +5148,7 @@ async function runYuqueImportCommand(args, title, detail = '正在处理语雀�
   log(`开始：${title}`, 'info');
   try {
     const provider = TOOLS['yuque-import'];
-    if (!provider?.script) throw new Error('语雀导入 Provider 未提供脚本');
+    if (!provider?.script) throw new Error('语雀导入未提供脚本');
     const result = await runProviderCommand(provider.script, args, {
       providerId: 'yuque-import',
       title,
@@ -5161,7 +5311,7 @@ async function handleYinxiangImportLogin() {
   log('开始：登录并同步印象笔记凭证', 'info');
   try {
     const exportProvider = TOOLS.yinxiang;
-    if (!exportProvider?.script) throw new Error('印象笔记导出 Provider 未提供凭证初始化脚本');
+    if (!exportProvider?.script) throw new Error('印象笔记导出未提供凭证初始化脚本');
     const result = await runProviderCommand(exportProvider.script, args, {
       providerId: 'yinxiang-import',
       title: '登录并同步印象笔记凭证',
@@ -5192,7 +5342,7 @@ async function runYinxiangImportCommand(args, title, detail = '正在处理印�
   log(`开始：${title}`, 'info');
   try {
     const provider = TOOLS['yinxiang-import'];
-    if (!provider?.script) throw new Error('印象笔记导入 Provider 未提供脚本');
+    if (!provider?.script) throw new Error('印象笔记导入未提供脚本');
     const result = await runProviderCommand(provider.script, args, {
       providerId: 'yinxiang-import',
       title,
@@ -6316,6 +6466,63 @@ async function saveFeishuImportConfigFromForm() {
   }
 }
 
+async function applyProbedFeishuTarget(data) {
+  const spaceId = String(data?.spaceId || '').trim();
+  const parentWikiToken = String(data?.targetWikiToken || '').trim();
+  if (!spaceId || !parentWikiToken) {
+    const message = '探测结果不完整：未同时返回 Space ID 和目标 Wiki Token，未替换现有目标配置。';
+    log(message, 'error');
+    alert(message);
+    return { updated: false, saved: false };
+  }
+
+  const spaceInput = document.getElementById('feishu-import-space-id');
+  const parentInput = document.getElementById('feishu-import-parent-token');
+  if (!spaceInput || !parentInput) {
+    const message = '飞书导入目标字段不可用，无法应用本次探测结果。';
+    log(message, 'error');
+    alert(message);
+    return { updated: false, saved: false };
+  }
+
+  spaceInput.value = spaceId;
+  parentInput.value = parentWikiToken;
+
+  const appId = document.getElementById('feishu-import-app-id')?.value.trim()
+    || feishuImportConfig.app_id
+    || '';
+  const appSecret = document.getElementById('feishu-import-app-secret')?.value.trim()
+    || feishuImportConfig.app_secret
+    || '';
+  const nextConfig = {
+    ...feishuImportConfig,
+    ...(appId ? { app_id: appId } : {}),
+    ...(appSecret ? { app_secret: appSecret } : {}),
+    space_id: spaceId,
+    parent_wiki_token: parentWikiToken,
+    obj_type: feishuImportConfig.obj_type || 'docx'
+  };
+  const configPath = feishuImportConfigPath();
+  if (!configPath) {
+    const message = '已将目标 Wiki 刷新到当前界面，但未能保存到本机配置：无法获取配置目录。';
+    log(message, 'warn');
+    alert(message);
+    return { updated: true, saved: false, spaceId, parentWikiToken };
+  }
+
+  const writeResult = await window.electronAPI.writeFile(configPath, JSON.stringify(nextConfig, null, 2));
+  if (!writeResult?.success) {
+    const message = `已将目标 Wiki 刷新到当前界面，但未能保存到本机配置：${writeResult?.error || '未知错误'}`;
+    log(message, 'warn');
+    alert(message);
+    return { updated: true, saved: false, spaceId, parentWikiToken };
+  }
+
+  feishuImportConfig = nextConfig;
+  log('已将目标 Wiki 更新为最新探测结果并保存到本机配置。', 'success');
+  return { updated: true, saved: true, spaceId, parentWikiToken };
+}
+
 // Load Feishu Import Tool (reuse existing import code)
 function loadFeishuImportTool() {
   const contentArea = document.getElementById('content-area');
@@ -6495,7 +6702,7 @@ async function runFeishuImportCommand(args, taskName) {
   log(`开始：${taskName}`, 'info');
   try {
     const provider = TOOLS['feishu-import'];
-    if (!provider?.script) throw new Error('飞书导入 Provider 未提供脚本');
+    if (!provider?.script) throw new Error('飞书导入未提供脚本');
     const result = await runProviderCommand(provider.script, args, {
       providerId: 'feishu-import',
       title: taskName,
@@ -6615,12 +6822,7 @@ function initializeFeishuImportHandlers() {
     if (!requireFeishuWikiUrl()) return;
     const data = await runFeishuImportCommand([...buildFeishuImportArgs(), '--probe'], '探测目标 Wiki');
     if (data) {
-      if (data.spaceId && !document.getElementById('feishu-import-space-id').value.trim()) {
-        document.getElementById('feishu-import-space-id').value = data.spaceId;
-      }
-      if (data.targetWikiToken && !document.getElementById('feishu-import-parent-token').value.trim()) {
-        document.getElementById('feishu-import-parent-token').value = data.targetWikiToken;
-      }
+      await applyProbedFeishuTarget(data);
     }
   });
   document.getElementById('feishu-import-plan').addEventListener('click', async () => {
@@ -6656,6 +6858,7 @@ function initializeFeishuImportHandlers() {
 
 // Initialize the shell immediately; slower provider discovery continues in the background.
 document.addEventListener('DOMContentLoaded', () => {
+  initializeRendererDiagnostics();
   applyTheme(loadTheme());
   initializeFormDraftPersistence();
   initializePythonProcessStateSync();
