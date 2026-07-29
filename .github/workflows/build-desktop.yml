@@ -244,7 +244,8 @@ jobs:
             throw "Trusted migration did not invoke the controlled legacy uninstaller"
           }
           $fixtureInvocation = Get-Content -Raw -LiteralPath $fixtureMarker
-          if (-not $fixtureInvocation.Contains($legacyUninstaller) -or -not $fixtureInvocation.Contains("/currentuser") -or -not $fixtureInvocation.Contains("/S") -or -not $fixtureInvocation.Contains("_?=$legacyRoot")) {
+          $fixtureLines = $fixtureInvocation -split "`r?`n"
+          if ($fixtureLines.Count -lt 5 -or $fixtureLines[0].StartsWith($legacyRoot, [System.StringComparison]::OrdinalIgnoreCase) -or -not $fixtureInvocation.Contains("/currentuser") -or -not $fixtureInvocation.Contains("/S") -or -not $fixtureInvocation.Contains("/KEEP_APP_DATA") -or -not $fixtureInvocation.Contains("_?=$legacyRoot")) {
             throw "Trusted migration invoked the legacy fixture with unexpected path or arguments"
           }
           $appExecutable = Get-ChildItem -LiteralPath $installRoot -Filter *.exe -File | Where-Object { $_.BaseName -ieq "wandao" } | Select-Object -First 1

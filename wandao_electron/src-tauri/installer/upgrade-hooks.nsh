@@ -109,10 +109,17 @@
 
   StrCpy $R5 13
   ClearErrors
-  ; NSIS _?= keeps the legacy uninstaller in-process instead of returning
-  ; after launching an asynchronous temporary copy. It must be the final
-  ; argument and is rebuilt from the already-validated install directory.
-  ExecWait '"$R8" /currentuser /S _?=$R6' $R0
+  ; Electron's uninstaller scans its install directory for running processes.
+  ; Running it in place makes that scan see the uninstaller itself and can
+  ; leave this installer waiting forever. Copy the verified executable out of
+  ; the legacy directory first, then use _?= only to tell it which directory
+  ; to uninstall. The directory argument must remain last.
+  CreateDirectory "$PLUGINSDIR\wandao-legacy-uninstaller"
+  ClearErrors
+  CopyFiles /SILENT "$R8" "$PLUGINSDIR\wandao-legacy-uninstaller"
+  IfErrors wandao_legacy_uninstall_failed
+  StrCpy $R3 "$PLUGINSDIR\wandao-legacy-uninstaller\Uninstall Wandao.exe"
+  ExecWait '"$R3" /currentuser /S /KEEP_APP_DATA _?=$R6' $R0
   IfErrors wandao_legacy_uninstall_failed
 
   ; Some historical Electron uninstallers return a non-zero status after

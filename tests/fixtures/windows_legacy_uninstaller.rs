@@ -61,10 +61,11 @@ fn main() {
     // tests can therefore prove that an untrusted command was never launched.
     write_invocation_marker(&arguments);
 
-    let legacy_root = current_executable()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| exit_with_error("legacy fixture install directory is missing"));
+    let legacy_root = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("_?="))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| exit_with_error("legacy fixture install directory argument is missing"));
     if !legacy_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -75,6 +76,7 @@ fn main() {
     let expected_arguments = [
         "/currentuser".to_owned(),
         "/S".to_owned(),
+        "/KEEP_APP_DATA".to_owned(),
         format!("_?={}", legacy_root.display()),
     ];
     if arguments != expected_arguments {
@@ -86,8 +88,8 @@ fn main() {
     let expected_uninstaller = fs::canonicalize(expected_uninstaller).unwrap_or_else(|error| {
         exit_with_error(&format!("cannot resolve expected fixture: {error}"))
     });
-    if !same_windows_path(&current_executable, &expected_uninstaller) {
-        exit_with_error("legacy fixture was launched outside its fixed install directory");
+    if same_windows_path(&current_executable, &expected_uninstaller) {
+        exit_with_error("legacy fixture must be copied out of its install directory before launch");
     }
 
     let legacy_main = legacy_root.join("Wandao.exe");

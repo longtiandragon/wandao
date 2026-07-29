@@ -131,7 +131,7 @@ class WindowsInstallerMigrationContractTests(unittest.TestCase):
 
         self.assertEqual(
             exec_waits,
-            ["ExecWait '\"$R8\" /currentuser /S _?=$R6' $R0"],
+            ["ExecWait '\"$R3\" /currentuser /S /KEEP_APP_DATA _?=$R6' $R0"],
         )
         self.assertNotIn("ExecWait $R2", self.preinstall)
         self.assertNotIn("ExecWait '$R2", self.preinstall)
@@ -142,7 +142,18 @@ class WindowsInstallerMigrationContractTests(unittest.TestCase):
         )
         self.assertIn("StrCpy $R3 '$\\\"$R8$\\\" /currentuser'", self.preinstall)
         self.assertIn("StrCpy $R3 '$\\\"$R8$\\\" /currentuser /S'", self.preinstall)
-        self.assertIn("_?= keeps the legacy uninstaller in-process", self.preinstall)
+        self.assertIn('CreateDirectory "$PLUGINSDIR\\wandao-legacy-uninstaller"', self.preinstall)
+        self.assertIn(
+            'CopyFiles /SILENT "$R8" "$PLUGINSDIR\\wandao-legacy-uninstaller"',
+            self.preinstall,
+        )
+        self.assertIn(
+            'StrCpy $R3 "$PLUGINSDIR\\wandao-legacy-uninstaller\\Uninstall Wandao.exe"',
+            self.preinstall,
+        )
+        self.assertIn("Running it in place makes that scan see the uninstaller itself", self.preinstall)
+        self.assertIn("/KEEP_APP_DATA", self.preinstall)
+        self.assertLess(self.preinstall.index("CopyFiles /SILENT"), self.preinstall.index("ExecWait"))
         self.assertIn('Delete "$R8"', self.preinstall)
 
     def test_running_legacy_process_is_rejected_without_force_kill(self) -> None:
@@ -302,11 +313,14 @@ class WindowsInstallerMigrationContractTests(unittest.TestCase):
         self.assertIn("thread::park()", fixture)
         self.assertIn('"/currentuser".to_owned()', fixture)
         self.assertIn('"/S".to_owned()', fixture)
+        self.assertIn('"/KEEP_APP_DATA".to_owned()', fixture)
+        self.assertIn('argument.strip_prefix("_?=")', fixture)
         self.assertIn('format!("_?={}", legacy_root.display())', fixture)
         self.assertIn("arguments != expected_arguments", fixture)
         self.assertIn('eq_ignore_ascii_case("wandao")', fixture)
         self.assertIn("LEGACY_INSTALL_KEY", fixture)
         self.assertIn("same_windows_path", fixture)
+        self.assertIn("legacy fixture must be copied out of its install directory", fixture)
         self.assertIn("fs::remove_file(&legacy_main)", fixture)
         self.assertIn("reg.exe", fixture)
         self.assertNotIn('env::var_os("APPDATA")', fixture)
