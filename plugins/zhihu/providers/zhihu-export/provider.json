@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "id": "zhihu-export",
+  "platform": "zhihu",
+  "name": "知乎",
+  "title": "知乎文章与回答 Markdown 导出",
+  "navLabel": "知乎导出",
+  "description": "导出单篇知乎专栏文章或单个回答为 Markdown；仅处理正文，不包含评论、推荐阅读和作者侧栏。",
+  "type": "automation",
+  "group": "export",
+  "trustLevel": "official",
+  "status": "experimental",
+  "defaults": { "output": "exports/zhihu" },
+  "homepage": "https://www.zhihu.com/",
+  "tags": ["导出", "知乎", "Markdown", "图片", "单篇"],
+  "capabilities": {
+    "export": true,
+    "import": false,
+    "guide": false,
+    "login": true,
+    "scanToc": false,
+    "images": true,
+    "attachments": false,
+    "tree": false,
+    "batch": false,
+    "retryFailures": false
+  },
+  "checkpoint": { "supported": true, "strategy": "items", "resourceTracking": true },
+  "fields": [
+    {
+      "name": "login_optional_notice",
+      "type": "notice",
+      "markdown": "公开的知乎专栏文章和回答可直接导出，无需登录；只有页面提示登录、安全验证或内容无权访问时，才需要使用下方的“登录并保存会话”。"
+    },
+    {
+      "name": "source_url",
+      "label": "知乎文章或回答链接",
+      "type": "text",
+      "arg": "--source-url",
+      "required": true,
+      "history": "url",
+      "placeholder": "https://zhuanlan.zhihu.com/p/... 或 https://www.zhihu.com/question/.../answer/...",
+      "actions": ["export"]
+    },
+    {
+      "name": "output",
+      "label": "输出目录",
+      "type": "directory",
+      "arg": "--output",
+      "required": true,
+      "history": "path",
+      "actions": ["export"]
+    },
+    {
+      "name": "download_images",
+      "label": "下载正文图片",
+      "type": "checkbox",
+      "arg": "--download-images",
+      "falseArg": "--no-download-images",
+      "default": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "incremental",
+      "label": "跳过已存在的 Markdown",
+      "type": "checkbox",
+      "arg": "--incremental",
+      "default": false,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_delay",
+      "label": "请求延迟秒",
+      "type": "number",
+      "arg": "--request-delay",
+      "default": 0.6,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_jitter",
+      "label": "随机浮动秒",
+      "type": "number",
+      "arg": "--request-jitter",
+      "default": 0.2,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "login",
+      "kind": "login",
+      "label": "登录并保存会话",
+      "script": "../../backend/export_zhihu.py",
+      "args": ["--login"],
+      "includeSelection": false,
+      "track": false,
+      "secondary": true
+    },
+    {
+      "id": "export",
+      "kind": "export",
+      "label": "开始导出",
+      "script": "../../backend/export_zhihu.py",
+      "args": ["--progress-every", "1"],
+      "includeSelection": false,
+      "progressTitle": "知乎单篇导出",
+      "progressDetail": "正在读取正文并保存图片..."
+    }
+  ]
+}

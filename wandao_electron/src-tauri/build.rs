@@ -22,6 +22,7 @@ const BUNDLED_PLUGIN_IDS: &[&str] = &[
     "yinxiang",
     "youdao",
     "yuque",
+    "zhihu",
     "zsxq",
 ];
 

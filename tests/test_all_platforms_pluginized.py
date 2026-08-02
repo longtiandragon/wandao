@@ -24,6 +24,7 @@ EXPECTED_PLUGINS = {
     "yinxiang": {"yinxiang", "yinxiang-import"},
     "youdao": {"youdao"},
     "yuque": {"yuque", "yuque-import"},
+    "zhihu": {"zhihu-export"},
     "zsxq": {"zsxq-group", "zsxq-column"},
 }
 
