@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 const PACKAGED_SOURCE_ROOTS: &[&str] = &["../../plugins", "../../providers", "../../wandao_core"];
 const BUNDLED_PLUGIN_IDS: &[&str] = &[
     "aliyun_thoughts",
+    "csdn",
     "dingtalk",
     "feishu",
     "ima",

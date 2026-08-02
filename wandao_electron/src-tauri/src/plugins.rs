@@ -2430,7 +2430,7 @@ mod tests {
             .iter()
             .map(|(plugin_id, _, _)| *plugin_id)
             .collect();
-        assert_eq!(ids.len(), 15);
+        assert_eq!(ids.len(), 16);
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repository_plugins = manifest_dir.join("..").join("..").join("plugins");
         let temporary =

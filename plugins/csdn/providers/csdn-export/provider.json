@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "id": "csdn-export",
+  "platform": "csdn",
+  "name": "CSDN",
+  "title": "CSDN 博客文章 Markdown 导出",
+  "navLabel": "CSDN 导出",
+  "description": "导出单篇 CSDN 博客文章为 Markdown；仅处理正文，不包含评论、推荐文章、广告和侧栏。",
+  "type": "automation",
+  "group": "export",
+  "trustLevel": "official",
+  "status": "experimental",
+  "defaults": { "output": "exports/csdn" },
+  "homepage": "https://blog.csdn.net/",
+  "tags": ["导出", "CSDN", "Markdown", "图片", "单篇"],
+  "capabilities": {
+    "export": true,
+    "import": false,
+    "guide": false,
+    "login": true,
+    "scanToc": false,
+    "images": true,
+    "attachments": false,
+    "tree": false,
+    "batch": false,
+    "retryFailures": false
+  },
+  "checkpoint": { "supported": true, "strategy": "items", "resourceTracking": true },
+  "fields": [
+    {
+      "name": "access_notice",
+      "type": "notice",
+      "markdown": "公开文章可直接导出。若 CSDN 显示安全验证，插件会保持等待，请在打开的浏览器中完成验证；若页面要求登录，请先使用下方“登录并保存会话”。插件不会绕过登录或安全验证。"
+    },
+    {
+      "name": "source_url",
+      "label": "CSDN 博客文章链接",
+      "type": "text",
+      "arg": "--source-url",
+      "required": true,
+      "history": "url",
+      "placeholder": "https://blog.csdn.net/作者/article/details/文章ID",
+      "actions": ["export"]
+    },
+    {
+      "name": "output",
+      "label": "输出目录",
+      "type": "directory",
+      "arg": "--output",
+      "required": true,
+      "history": "path",
+      "actions": ["export"]
+    },
+    {
+      "name": "download_images",
+      "label": "下载正文图片",
+      "type": "checkbox",
+      "arg": "--download-images",
+      "falseArg": "--no-download-images",
+      "default": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "incremental",
+      "label": "跳过已存在的 Markdown",
+      "type": "checkbox",
+      "arg": "--incremental",
+      "default": false,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "verification_wait_seconds",
+      "label": "登录或安全验证等待秒数",
+      "type": "number",
+      "arg": "--verification-wait-seconds",
+      "default": 300,
+      "min": 30,
+      "step": 10,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_delay",
+      "label": "请求延迟秒",
+      "type": "number",
+      "arg": "--request-delay",
+      "default": 0.8,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_jitter",
+      "label": "随机浮动秒",
+      "type": "number",
+      "arg": "--request-jitter",
+      "default": 0.2,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "login",
+      "kind": "login",
+      "label": "登录并保存会话",
+      "script": "../../backend/export_csdn.py",
+      "args": ["--login"],
+      "includeSelection": false,
+      "track": false,
+      "secondary": true
+    },
+    {
+      "id": "export",
+      "kind": "export",
+      "label": "开始导出",
+      "script": "../../backend/export_csdn.py",
+      "args": ["--progress-every", "1"],
+      "includeSelection": false,
+      "progressTitle": "CSDN 单篇导出",
+      "progressDetail": "正在读取正文并保存图片..."
+    }
+  ]
+}

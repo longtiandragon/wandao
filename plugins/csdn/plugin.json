@@ -1,17 +1,17 @@
 {
   "$schema": "../plugin.schema.json",
   "schemaVersion": 1,
-  "id": "zhihu",
-  "name": "知乎",
-  "description": "将本人有权访问的知乎单篇专栏文章或回答导出为本地 Markdown，并可保存正文图片。",
+  "id": "csdn",
+  "name": "CSDN",
+  "description": "将本人有权访问的单篇 CSDN 博客文章导出为本地 Markdown，并可保存正文图片。",
   "version": "1.0.0",
   "publisher": "Wandao Official",
-  "homepage": "https://www.zhihu.com/",
+  "homepage": "https://blog.csdn.net/",
   "license": "AGPL-3.0-only",
   "core": { "minVersion": "1.4.1" },
   "platforms": ["win32", "darwin"],
   "entrypoints": {
-    "providers": ["providers/zhihu-export/provider.json"]
+    "providers": ["providers/csdn-export/provider.json"]
   },
   "permissions": [
     "browser-automation",
