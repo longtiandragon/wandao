@@ -17,6 +17,7 @@ const BUNDLED_PLUGIN_IDS: &[&str] = &[
     "notion",
     "obsidian",
     "onenote",
+    "wechat",
     "wiz",
     "wps",
     "xiliu",

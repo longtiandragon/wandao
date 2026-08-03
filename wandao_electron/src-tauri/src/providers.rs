@@ -1290,8 +1290,8 @@ mod tests {
             discovery.errors
         );
         let expected_provider_count = match platform_id() {
-            "win32" => 22,
-            "darwin" => 21,
+            "win32" => 23,
+            "darwin" => 22,
             "linux" => 18,
             platform => panic!("unsupported test platform: {platform}"),
         };

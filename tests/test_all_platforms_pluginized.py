@@ -19,6 +19,7 @@ EXPECTED_PLUGINS = {
     "notion": {"notion"},
     "obsidian": {"obsidian-export"},
     "onenote": {"onenote"},
+    "wechat": {"wechat-export"},
     "wiz": {"wiz"},
     "wps": {"wps-export"},
     "xiliu": {"xiliu", "xiliu-import"},

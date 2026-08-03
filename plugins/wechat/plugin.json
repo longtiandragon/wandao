@@ -1,0 +1,22 @@
+{
+  "$schema": "../plugin.schema.json",
+  "schemaVersion": 1,
+  "id": "wechat",
+  "name": "微信公众号",
+  "description": "将本人有权访问的单篇微信公众号文章导出为本地 Markdown，并可保存正文图片。",
+  "version": "1.0.0",
+  "publisher": "Wandao Official",
+  "homepage": "https://mp.weixin.qq.com/",
+  "license": "AGPL-3.0-only",
+  "core": { "minVersion": "1.4.1" },
+  "platforms": ["win32", "darwin"],
+  "entrypoints": {
+    "providers": ["providers/wechat-export/provider.json"]
+  },
+  "permissions": [
+    "browser-automation",
+    "filesystem:write",
+    "network",
+    "process"
+  ]
+}

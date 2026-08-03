@@ -600,10 +600,10 @@ class PackagedSmokeContractTests(unittest.TestCase):
             for path in (REPO_ROOT / "plugins").iterdir()
             if path.is_dir() and (path / "plugin.json").is_file()
         }
-        self.assertEqual(len(expected_plugins), 16)
+        self.assertEqual(len(expected_plugins), 17)
         expected_counts = {
-            "win32": (22, 21),
-            "darwin": (21, 20),
+            "win32": (23, 22),
+            "darwin": (22, 21),
             "linux": (18, 17),
         }
         for target_platform, (provider_count, executable_count) in expected_counts.items():

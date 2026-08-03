@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "wechat-export",
+  "platform": "wechat",
+  "name": "微信公众号",
+  "title": "微信公众号文章 Markdown 导出",
+  "navLabel": "微信公众号导出",
+  "description": "导出单篇微信公众号文章为 Markdown；仅处理正文和正文图片，不读取公众号历史文章、合集或评论。",
+  "type": "automation",
+  "group": "export",
+  "trustLevel": "official",
+  "status": "experimental",
+  "defaults": { "output": "exports/wechat" },
+  "homepage": "https://mp.weixin.qq.com/",
+  "tags": ["导出", "微信公众号", "微信文章", "Markdown", "图片", "单篇"],
+  "capabilities": {
+    "export": true,
+    "import": false,
+    "guide": false,
+    "login": false,
+    "scanToc": false,
+    "images": true,
+    "attachments": false,
+    "tree": false,
+    "batch": false,
+    "retryFailures": false
+  },
+  "checkpoint": { "supported": true, "strategy": "items", "resourceTracking": true },
+  "fields": [
+    {
+      "name": "access_notice",
+      "type": "notice",
+      "markdown": "仅支持公开的单篇微信公众号文章链接。插件不会读取公众号历史消息、抓取密钥或调用微信私有接口；如页面要求安全验证，会等待你在插件打开的浏览器中完成验证后自动继续。若文章明确要求在微信客户端内打开，当前单篇导出无法绕过该限制。"
+    },
+    {
+      "name": "source_url",
+      "label": "微信公众号文章链接",
+      "type": "text",
+      "arg": "--source-url",
+      "required": true,
+      "history": "url",
+      "placeholder": "https://mp.weixin.qq.com/s?__biz=...&mid=...&idx=...&sn=...",
+      "actions": ["export"]
+    },
+    {
+      "name": "output",
+      "label": "输出目录",
+      "type": "directory",
+      "arg": "--output",
+      "required": true,
+      "history": "path",
+      "actions": ["export"]
+    },
+    {
+      "name": "download_images",
+      "label": "下载正文图片",
+      "type": "checkbox",
+      "arg": "--download-images",
+      "falseArg": "--no-download-images",
+      "default": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "incremental",
+      "label": "跳过已存在的 Markdown",
+      "type": "checkbox",
+      "arg": "--incremental",
+      "default": false,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "verification_wait_seconds",
+      "label": "安全验证等待秒数",
+      "type": "number",
+      "arg": "--verification-wait-seconds",
+      "default": 300,
+      "min": 30,
+      "step": 10,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_delay",
+      "label": "请求延迟秒",
+      "type": "number",
+      "arg": "--request-delay",
+      "default": 0.8,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    },
+    {
+      "name": "request_jitter",
+      "label": "随机浮动秒",
+      "type": "number",
+      "arg": "--request-jitter",
+      "default": 0.2,
+      "min": 0,
+      "step": 0.1,
+      "advanced": true,
+      "actions": ["export"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "export",
+      "kind": "export",
+      "label": "开始导出",
+      "script": "../../backend/export_wechat.py",
+      "args": ["--progress-every", "1"],
+      "includeSelection": false,
+      "progressTitle": "微信公众号单篇导出",
+      "progressDetail": "正在读取正文并保存图片..."
+    }
+  ]
+}
