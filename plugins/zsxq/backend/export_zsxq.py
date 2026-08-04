@@ -367,6 +367,7 @@ def format_duration(seconds: float | int | None) -> str:
 def throttle_request(args: argparse.Namespace | None) -> None:
     if not args:
         return
+    maybe_periodic_long_sleep_before_api_request(args)
     delay = max(0.0, float(getattr(args, "request_delay", 0) or 0))
     jitter = max(0.0, float(getattr(args, "request_jitter", 0) or 0))
     pause = delay + (random.uniform(0, jitter) if jitter else 0)
@@ -378,6 +379,7 @@ def throttle_request(args: argparse.Namespace | None) -> None:
 def throttle_comment_request(args: argparse.Namespace | None) -> None:
     if not args:
         return
+    maybe_periodic_long_sleep_before_api_request(args)
     delay = max(
         float(getattr(args, "request_delay", 0) or 0),
         float(getattr(args, "comment_request_delay", 3.0) or 0),
@@ -390,6 +392,72 @@ def throttle_comment_request(args: argparse.Namespace | None) -> None:
     if pause > 0:
         wait_with_stop(args, pause)
     args._comment_request_count = int(getattr(args, "_comment_request_count", 0) or 0) + 1
+
+
+def sensitive_api_request_count(args: argparse.Namespace | None) -> int:
+    """Count ZSXQ API/navigation requests without treating asset downloads as API traffic."""
+    if not args:
+        return 0
+    return (
+        int(getattr(args, "_request_count", 0) or 0)
+        + int(getattr(args, "_comment_request_count", 0) or 0)
+    )
+
+
+def long_sleep_request_threshold(args: argparse.Namespace, request_count: int) -> int:
+    """Return the completed API-request boundary that should cause a long sleep."""
+    after = int(getattr(args, "long_sleep_after", 12) or 0)
+    every = int(getattr(args, "long_sleep_every", 12) or 0)
+    if after <= 0 or every <= 0 or request_count < after:
+        return 0
+    return after + ((request_count - after) // every) * every
+
+
+def maybe_periodic_long_sleep_before_api_request(args: argparse.Namespace | None) -> None:
+    """Protect column/topic exports after a bounded number of ZSXQ API requests.
+
+    The pause is intentionally checked before the *next* request, so a boundary
+    of 12 means 12 requests have already completed. Images and attachments use
+    their own CDN throttle and do not contribute to this counter.
+    """
+    if not args or getattr(args, "_long_sleep_unit", "") != "api-requests":
+        return
+    request_count = sensitive_api_request_count(args)
+    threshold = long_sleep_request_threshold(args, request_count)
+    last_threshold = int(getattr(args, "_last_api_long_sleep_threshold", 0) or 0)
+    if not threshold or threshold <= last_threshold:
+        return
+
+    pause = random.uniform(
+        max(0.0, float(getattr(args, "long_sleep_min", 180) or 0)),
+        max(0.0, float(getattr(args, "long_sleep_max", 240) or 0)),
+    )
+    args._last_api_long_sleep_threshold = threshold
+    args._api_request_long_sleep_count = int(getattr(args, "_api_request_long_sleep_count", 0) or 0) + 1
+    args._api_request_long_sleep_seconds = float(getattr(args, "_api_request_long_sleep_seconds", 0.0) or 0.0) + pause
+    emit(
+        args,
+        f"大批量保护：已完成 {request_count} 次知识星球 API 请求，长休眠 {format_duration(pause)} 后继续。",
+        event="task.paused",
+        level="info",
+        stats={
+            "sensitiveApiRequests": request_count,
+            "longSleepRequestThreshold": threshold,
+            "longSleepSeconds": round(pause, 1),
+            "longSleepCount": int(getattr(args, "_api_request_long_sleep_count", 0) or 0),
+        },
+    )
+    wait_with_stop(args, pause)
+    emit(
+        args,
+        f"长休眠结束，继续知识星球 API 请求：累计 {request_count} 次。",
+        event="task.resumed",
+        level="info",
+        stats={
+            "sensitiveApiRequests": request_count,
+            "longSleepCount": int(getattr(args, "_api_request_long_sleep_count", 0) or 0),
+        },
+    )
 
 
 def throttle_resource_request(args: argparse.Namespace | None, resource_type: str) -> None:
@@ -3790,6 +3858,7 @@ def finish_checkpoint_task_safely(
 
 def export_entry(args: argparse.Namespace) -> dict[str, Any]:
     entry_url = normalize_entry_url(args.entry_url)
+    is_group_export = is_group_entry_url(entry_url)
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     checkpoint: WandaoCheckpoint | None = None
@@ -3824,8 +3893,18 @@ def export_entry(args: argparse.Namespace) -> dict[str, Any]:
     args.group_page_jitter = max(0.0, float(getattr(args, "group_page_jitter", 4.0) or 0))
     args.long_sleep_after = max(0, int(getattr(args, "long_sleep_after", 12) or 0))
     args.long_sleep_every = max(0, int(getattr(args, "long_sleep_every", 12) or 0))
-    args.long_sleep_min = max(0.0, float(getattr(args, "long_sleep_min", 180) or 0))
-    args.long_sleep_max = max(args.long_sleep_min, float(getattr(args, "long_sleep_max", 240) or 0))
+    default_long_sleep_min, default_long_sleep_max = (180.0, 240.0) if is_group_export else (60.0, 60.0)
+    raw_long_sleep_min = getattr(args, "long_sleep_min", None)
+    raw_long_sleep_max = getattr(args, "long_sleep_max", None)
+    args.long_sleep_min = max(0.0, float(default_long_sleep_min if raw_long_sleep_min is None else raw_long_sleep_min))
+    args.long_sleep_max = max(
+        args.long_sleep_min,
+        float(default_long_sleep_max if raw_long_sleep_max is None else raw_long_sleep_max),
+    )
+    # Group exports already have a predictable page boundary. Column/topic
+    # exports need request-based protection because recursive links and
+    # comment pagination can grow without increasing the document count.
+    args._long_sleep_unit = "group-pages" if is_group_export else "api-requests"
     if getattr(args, "follow_link_scope", "none") not in {"all", "articles", "none"}:
         args.follow_link_scope = "none"
     args.follow_group_links = bool(getattr(args, "follow_group_links", False))
@@ -4110,35 +4189,6 @@ def export_entry(args: argparse.Namespace) -> dict[str, Any]:
                     "localPath": report_local_path(path) if path else "",
                     "reason": reason,
                 }
-            )
-
-        def maybe_long_sleep_after_export() -> None:
-            nonlocal long_sleep_count, long_sleep_seconds
-            # Group exports protect the account at list-page boundaries.  A
-            # page contains a bounded batch of posts, so sleeping after every
-            # N pages is predictable even when posts differ wildly in assets.
-            if use_group_topics:
-                return
-            has_more_work = bool(queue_links) or (use_group_topics and not group_exhausted)
-            if not has_more_work or not should_long_sleep_after_export(args, exported):
-                return
-            pause = random.uniform(args.long_sleep_min, args.long_sleep_max)
-            long_sleep_count += 1
-            long_sleep_seconds += pause
-            emit(
-                args,
-                f"大批量保护：已导出 {exported} 篇，长休眠 {format_duration(pause)} 后继续。",
-                event="task.paused",
-                level="info",
-                stats={"exportedDocs": exported, "longSleepSeconds": round(pause, 1), "longSleepCount": long_sleep_count},
-            )
-            wait_with_stop(args, pause)
-            emit(
-                args,
-                f"长休眠结束，继续导出：已完成 {exported} 篇。",
-                event="task.resumed",
-                level="info",
-                stats={"exportedDocs": exported, "longSleepCount": long_sleep_count},
             )
 
         def maybe_long_sleep_after_group_page() -> None:
@@ -5013,7 +5063,6 @@ def export_entry(args: argparse.Namespace) -> dict[str, Any]:
                         if child_href and not link_seen(child_link, seen_urls) and not link_seen(child_link, queued_urls):
                             mark_link_seen(child_link, queued_urls)
                             queue_links.append((dict(child_link, kind="link", outputDir=str(child_output)), depth + 1))
-                maybe_long_sleep_after_export()
             except RateLimitPaused as exc:
                 rate_limited_paused = True
                 rate_limit_pause_reason = str(exc)
@@ -5142,11 +5191,12 @@ def export_entry(args: argparse.Namespace) -> dict[str, Any]:
             "followGroupLinks": bool(args.follow_group_links),
             "longSleepAfter": args.long_sleep_after,
             "longSleepEvery": args.long_sleep_every,
-            "longSleepUnit": "group-pages" if use_group_topics else "exported-docs",
+            "longSleepUnit": "group-pages" if use_group_topics else "api-requests",
             "longSleepMinSeconds": args.long_sleep_min,
             "longSleepMaxSeconds": args.long_sleep_max,
-            "longSleepCount": long_sleep_count,
-            "longSleepSeconds": round(long_sleep_seconds, 1),
+            "longSleepCount": long_sleep_count + int(getattr(args, "_api_request_long_sleep_count", 0) or 0),
+            "longSleepSeconds": round(long_sleep_seconds + float(getattr(args, "_api_request_long_sleep_seconds", 0.0) or 0.0), 1),
+            "longSleepRequestThreshold": int(getattr(args, "_last_api_long_sleep_threshold", 0) or 0),
             "stopped": stopped,
             "rateLimitedPaused": rate_limited_paused,
             "rateLimitPauseReason": rate_limit_pause_reason,
@@ -5156,6 +5206,8 @@ def export_entry(args: argparse.Namespace) -> dict[str, Any]:
             "attachmentFailureCount": sum(len(item["failures"]) for item in file_failures),
             "localLinkRewriteFiles": local_link_rewrite_count,
             "requestCount": int(getattr(args, "_request_count", 0) or 0),
+            "commentRequestCount": int(getattr(args, "_comment_request_count", 0) or 0),
+            "sensitiveApiRequestCount": sensitive_api_request_count(args),
             "resourceRequestCount": int(getattr(args, "_resource_request_count", 0) or 0),
             "imageRequestCount": int(getattr(args, "_resource_image_request_count", 0) or 0),
             "attachmentRequestCount": int(getattr(args, "_resource_attachment_request_count", 0) or 0),
@@ -5812,10 +5864,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=4,
         help="Safely pause the resumable task on this 429/1059 event; the first three events use progressively longer sleeps",
     )
-    parser.add_argument("--long-sleep-after", type=int, default=12, help="For Group exports, enable long sleep after this many list pages. 0 disables it")
-    parser.add_argument("--long-sleep-every", type=int, default=12, help="For Group exports, sleep after this many further list pages")
-    parser.add_argument("--long-sleep-min", type=float, default=180, help="Minimum long sleep seconds for large ZSXQ exports")
-    parser.add_argument("--long-sleep-max", type=float, default=240, help="Maximum long sleep seconds for large ZSXQ exports")
+    parser.add_argument("--long-sleep-after", type=int, default=12, help="For column/topic exports, enable long sleep after this many ZSXQ API requests; for Group exports, after this many list pages. 0 disables it")
+    parser.add_argument("--long-sleep-every", type=int, default=12, help="For column/topic exports, sleep after this many further ZSXQ API requests; for Group exports, after this many further list pages")
+    parser.add_argument("--long-sleep-min", type=float, help="Minimum long sleep seconds. Defaults to 60 for column/topic exports and 180 for Group exports")
+    parser.add_argument("--long-sleep-max", type=float, help="Maximum long sleep seconds. Defaults to 60 for column/topic exports and 240 for Group exports")
     parser.add_argument("--include-video-topics", dest="skip_video_topics", action="store_false", help="Export video-only ZSXQ topic pages instead of skipping them")
     parser.add_argument("--skip-video-topics", dest="skip_video_topics", action="store_true", help="Skip video-only ZSXQ topic pages")
     parser.set_defaults(skip_video_topics=True)

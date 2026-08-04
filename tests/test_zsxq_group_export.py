@@ -25,6 +25,8 @@ from export_zsxq import (
     resolve_toc_item_api,
     should_long_sleep_after_export,
     should_long_sleep_after_group_page,
+    long_sleep_request_threshold,
+    sensitive_api_request_count,
     clear_rate_limit_streak,
     should_refresh_newest_group_topics,
     should_scan_newest_before_group_resume,
@@ -34,6 +36,7 @@ from export_zsxq import (
     finish_checkpoint_task_safely,
     summarize_zsxq_api_failure,
     throttle_comment_request,
+    throttle_request,
     throttle_resource_request,
     inherit_completed_group_items,
     load_compatible_group_cursor,
@@ -230,6 +233,44 @@ class ZsxqGroupExportTests(unittest.TestCase):
         self.assertTrue(should_long_sleep_after_group_page(args, 24))
         self.assertFalse(should_long_sleep_after_group_page(args, 25))
 
+    def test_column_long_sleep_uses_sensitive_api_requests_not_exported_documents(self) -> None:
+        args = argparse.Namespace(
+            long_sleep_after=12,
+            long_sleep_every=12,
+            _request_count=11,
+            _comment_request_count=1,
+        )
+
+        self.assertEqual(sensitive_api_request_count(args), 12)
+        self.assertEqual(long_sleep_request_threshold(args, 11), 0)
+        self.assertEqual(long_sleep_request_threshold(args, 12), 12)
+        self.assertEqual(long_sleep_request_threshold(args, 25), 24)
+
+    def test_column_sleeps_once_before_request_after_api_request_boundary(self) -> None:
+        args = argparse.Namespace(
+            _long_sleep_unit="api-requests",
+            _request_count=12,
+            _comment_request_count=0,
+            request_delay=0,
+            request_jitter=0,
+            long_sleep_after=12,
+            long_sleep_every=12,
+            long_sleep_min=180,
+            long_sleep_max=240,
+        )
+
+        with (
+            mock.patch.object(export_zsxq, "wait_with_stop") as wait,
+            mock.patch.object(export_zsxq.random, "uniform", return_value=180),
+        ):
+            throttle_request(args)
+            throttle_request(args)
+
+        self.assertEqual(args._request_count, 14)
+        self.assertEqual(args._api_request_long_sleep_count, 1)
+        self.assertEqual(args._last_api_long_sleep_threshold, 12)
+        wait.assert_called_once_with(args, 180)
+
     def test_newest_group_refresh_only_runs_when_a_prior_group_task_exists(self) -> None:
         args = argparse.Namespace(resume=True, retry_failed=False)
         self.assertFalse(
@@ -298,6 +339,18 @@ class ZsxqGroupExportTests(unittest.TestCase):
             self.assertEqual(fields[name]["arg"], arg)
             self.assertEqual(fields[name]["default"], default)
             self.assertIn("export", fields[name]["actions"])
+
+    def test_column_provider_defaults_to_one_minute_request_based_long_sleep(self) -> None:
+        manifest = json.loads(
+            (Path(__file__).resolve().parents[1] / "plugins" / "zsxq" / "providers" / "zsxq-column" / "provider.json")
+            .read_text(encoding="utf-8")
+        )
+        fields = {field["name"]: field for field in manifest["fields"]}
+
+        self.assertEqual(fields["long_sleep_after"]["default"], 12)
+        self.assertEqual(fields["long_sleep_every"]["default"], 12)
+        self.assertEqual(fields["long_sleep_min"]["default"], 60)
+        self.assertEqual(fields["long_sleep_max"]["default"], 60)
 
     def test_provider_defaults_disable_recursive_links_but_keep_manual_control(self) -> None:
         root = Path(__file__).resolve().parents[1] / "plugins" / "zsxq" / "providers"
