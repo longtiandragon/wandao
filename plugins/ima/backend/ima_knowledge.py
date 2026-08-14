@@ -13,6 +13,7 @@ download APIs.
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import hashlib
 import hmac
@@ -22,6 +23,8 @@ import mimetypes
 import os
 import random
 import re
+import shutil
+import socket
 import sys
 import time
 import urllib.error
@@ -133,6 +136,31 @@ MARKDOWN_REFERENCE_RE = re.compile(
     r"!\[[^\]]*\]\(([^)]+)\)|\[[^\]]+\]\(([^)]+)\)|<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']",
     re.IGNORECASE,
 )
+MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[[^\]]*\]\(\s*(?:<(?P<bracket>https?://[^>\s]+)>|(?P<plain>https?://[^)\s]+))",
+    re.IGNORECASE,
+)
+HTML_IMAGE_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"'](?P<src>[^\"']+)[\"']", re.IGNORECASE)
+REMOTE_URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.IGNORECASE)
+DATA_IMAGE_RE = re.compile(r"data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", re.IGNORECASE)
+IMAGE_URL_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+READ_RETRY_ACTIONS = {
+    "check_repeated_names",
+    "get_addable_knowledge_base_list",
+    "get_doc_content",
+    "get_knowledge_list",
+    "get_media_info",
+    "search_knowledge_base",
+}
+BARE_IMAGE_LINE_RE = re.compile(
+    r"(?m)^(?P<indent>\s*)(?P<url>https?://[^\s<>\"')]+)(?P<trailing>\s*)$",
+    re.IGNORECASE,
+)
+MARKDOWN_IMAGE_REFERENCE_RE = re.compile(
+    r"!\[[^\]]*\]\(\s*(?P<value><[^>\n]+>|[^)\n]+)\)",
+    re.IGNORECASE,
+)
+HTML_IMAGE_REFERENCE_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*[\"'](?P<src>[^\"']+)[\"']", re.IGNORECASE)
 
 
 @dataclass
@@ -266,6 +294,15 @@ def throttle(args: argparse.Namespace | None) -> None:
     args._request_count = int(getattr(args, "_request_count", 0) or 0) + 1
 
 
+def is_timeout_exception(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        return isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower()
+    return "timed out" in str(exc).lower()
+
+
 class ImaClient:
     def __init__(self, client_id: str, api_key: str, args: argparse.Namespace | None = None) -> None:
         self.client_id = client_id
@@ -273,28 +310,46 @@ class ImaClient:
         self.args = args
 
     def post(self, base_path: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
-        check_stopped(self.args)
-        throttle(self.args)
         url = f"{BASE_URL}/{base_path}/{action}"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "ima-openapi-clientid": self.client_id,
-                "ima-openapi-apikey": self.api_key,
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise ImaError(f"ima API HTTP {exc.code}：{detail}") from exc
-        except urllib.error.URLError as exc:
-            raise ImaError(f"ima API 请求失败：{exc}") from exc
+        attempts = 3 if action in READ_RETRY_ACTIONS else 1
+        raw = ""
+        for attempt in range(attempts):
+            check_stopped(self.args)
+            if attempt:
+                wait_with_stop(self.args, min(1.5 * attempt, 4.0))
+            throttle(self.args)
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "ima-openapi-clientid": self.client_id,
+                    "ima-openapi-apikey": self.api_key,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    raw = response.read().decode("utf-8", errors="replace")
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise ImaError(f"ima API HTTP {exc.code}：{detail}") from exc
+            except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+                if is_timeout_exception(exc) and attempt + 1 < attempts:
+                    emit(
+                        f"ima API {action} 读取超时，正在重试（{attempt + 1}/{attempts - 1}）",
+                        event="request.retry",
+                        level="warn",
+                        action=action,
+                    )
+                    continue
+                if is_timeout_exception(exc):
+                    raise ImaError(f"ima API {action} 读取超时：{exc}") from exc
+                raise ImaError(f"ima API 请求失败：{exc}") from exc
+        if not raw:
+            raise ImaError(f"ima API {action} 未返回内容")
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -520,30 +575,287 @@ def extension_for_download(title: str, media_type: int | None, content_type: str
 
 
 def download_url(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, str]:
-    request = urllib.request.Request(url, headers=headers or {})
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return response.read(), response.headers.get("Content-Type", "")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise ImaError(f"下载原文 HTTP {exc.code}：{detail}") from exc
-    except urllib.error.URLError as exc:
-        raise ImaError(f"下载原文失败：{exc}") from exc
+    for attempt in range(3):
+        request = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return response.read(), response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ImaError(f"下载原文 HTTP {exc.code}：{detail}") from exc
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+            if is_timeout_exception(exc) and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if is_timeout_exception(exc):
+                raise ImaError(f"下载原文读取超时：{exc}") from exc
+            raise ImaError(f"下载原文失败：{exc}") from exc
+    raise ImaError("下载原文失败：重试次数已用尽")
 
 
-def save_note_entry(client: ImaClient, entry: KnowledgeEntry, target_dir: Path) -> Path:
+def _clean_remote_url(value: str) -> str:
+    return html.unescape(str(value or "").strip()).strip("<>").rstrip(".,;，。；")
+
+
+def _is_remote_image_url(url: str, *, allow_unknown_suffix: bool = False) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    suffix = Path(urllib.parse.unquote(parsed.path)).suffix.lower()
+    return allow_unknown_suffix or suffix in IMAGE_URL_SUFFIXES
+
+
+def remote_image_urls(markdown: str) -> list[str]:
+    """Return remote image URLs without attempting to fetch arbitrary links."""
+
+    result: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str, *, allow_unknown_suffix: bool = False) -> None:
+        url = _clean_remote_url(raw)
+        if url and url not in seen and _is_remote_image_url(url, allow_unknown_suffix=allow_unknown_suffix):
+            seen.add(url)
+            result.append(url)
+
+    for match in MARKDOWN_IMAGE_RE.finditer(markdown):
+        add(match.group("bracket") or match.group("plain"), allow_unknown_suffix=True)
+    for match in HTML_IMAGE_RE.finditer(markdown):
+        add(match.group("src"), allow_unknown_suffix=True)
+    for match in REMOTE_URL_RE.finditer(markdown):
+        add(match.group(0))
+    return result
+
+
+def data_image_urls(markdown: str) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in DATA_IMAGE_RE.finditer(markdown):
+        value = match.group(0)
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _resource_failure(resource_failures: list[dict[str, str]], url: str, exc: Exception) -> None:
+    host = urllib.parse.urlparse(url).netloc or "unknown-host"
+    resource_failures.append({"type": "image", "host": host, "error": str(exc)})
+
+
+def localize_markdown_images(
+    markdown: str,
+    assets_dir: Path,
+    resource_failures: list[dict[str, str]] | None = None,
+) -> tuple[str, int]:
+    """Download remote Markdown images and rewrite them to sibling local assets."""
+
+    failures = resource_failures if resource_failures is not None else []
+    urls = [*remote_image_urls(markdown), *data_image_urls(markdown)]
+    if not urls:
+        return markdown, 0
+
+    replacements: dict[str, str] = {}
+    downloaded = 0
+    for index, url in enumerate(urls, 1):
+        try:
+            if url.startswith("data:"):
+                header, encoded = url.split(",", 1)
+                content = base64.b64decode(encoded, validate=True)
+                content_type = header[5:].split(";", 1)[0]
+            else:
+                content, content_type = download_url(url)
+            if not content:
+                raise ImaError("图片响应为空")
+            source_name = "" if url.startswith("data:") else Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
+            suffix = extension_for_download(source_name, None, content_type)
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            target = unique_path(assets_dir / f"image-{index:03d}{suffix}")
+            target.write_bytes(content)
+            replacements[url] = f"{assets_dir.name}/{target.name}".replace("\\", "/")
+            downloaded += 1
+        except Exception as exc:
+            _resource_failure(failures, url, exc)
+
+    localized = markdown
+    for remote_url, local_url in replacements.items():
+        localized = localized.replace(remote_url, local_url)
+
+    def replace_bare_image_line(match: re.Match[str]) -> str:
+        url = _clean_remote_url(match.group("url"))
+        local_url = replacements.get(url)
+        if not local_url:
+            return match.group(0)
+        return f"{match.group('indent')}![]({local_url}){match.group('trailing')}"
+
+    localized = BARE_IMAGE_LINE_RE.sub(replace_bare_image_line, localized)
+    return localized, downloaded
+
+
+def _local_image_references(markdown: str) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in MARKDOWN_IMAGE_REFERENCE_RE.finditer(markdown):
+        value = match.group("value").strip()
+        if value.startswith("<") and value.endswith(">"):
+            value = value[1:-1].strip()
+        else:
+            value = re.sub(r"\s+(?:\"[^\"]*\"|'[^']*')\s*$", "", value).strip()
+        value = _clean_remote_url(value)
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    for match in HTML_IMAGE_REFERENCE_RE.finditer(markdown):
+        value = _clean_remote_url(match.group("src"))
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def embed_local_markdown_images(
+    markdown: str,
+    source_path: Path,
+    source_root: Path,
+    resource_failures: list[dict[str, str]] | None = None,
+) -> tuple[str, int]:
+    """Embed local Markdown images so an IMA note remains self-contained."""
+
+    failures = resource_failures if resource_failures is not None else []
+    replacements: dict[str, str] = {}
+    embedded = 0
+    source_path = source_path.resolve()
+    source_root = source_root.resolve()
+    for raw_reference in _local_image_references(markdown):
+        parsed = urllib.parse.urlparse(raw_reference)
+        if parsed.scheme or parsed.netloc or raw_reference.startswith(("/", "\\", "data:")):
+            continue
+        reference = urllib.parse.unquote(raw_reference.split("#", 1)[0].split("?", 1)[0])
+        candidate = (source_path.parent / reference).resolve()
+        try:
+            candidate.relative_to(source_root)
+        except ValueError:
+            failures.append({"type": "image", "reference": raw_reference, "error": "引用路径超出导入目录"})
+            continue
+        if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_URL_SUFFIXES:
+            failures.append({"type": "image", "reference": raw_reference, "error": "本地图片不存在或格式不支持"})
+            continue
+        try:
+            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            encoded = base64.b64encode(candidate.read_bytes()).decode("ascii")
+            replacements[raw_reference] = f"data:{content_type};base64,{encoded}"
+            embedded += 1
+        except OSError as exc:
+            failures.append({"type": "image", "reference": raw_reference, "error": str(exc)})
+
+    localized = markdown
+    for raw_reference, data_url in replacements.items():
+        localized = localized.replace(raw_reference, data_url)
+    return localized, embedded
+
+
+def repair_exported_local_image_references(output_root: Path) -> tuple[int, list[dict[str, str]]]:
+    """Restore local Markdown image paths after ima flattens imported files."""
+
+    output_root = output_root.resolve()
+    image_paths = [
+        path
+        for path in iter_regular_files_under_root(output_root)
+        if path.suffix.lower() in IMAGE_URL_SUFFIXES
+    ]
+    by_name: dict[str, list[Path]] = {}
+    for path in image_paths:
+        by_name.setdefault(path.name, []).append(path)
+
+    repaired = 0
+    failures: list[dict[str, str]] = []
+    for markdown_path in iter_regular_files_under_root(output_root, suffixes={".md", ".markdown"}):
+        try:
+            text = markdown_path.read_text("utf-8", errors="ignore")
+        except OSError as exc:
+            failures.append({"title": markdown_path.name, "reference": "", "reason": str(exc)})
+            continue
+        for raw_reference in _local_image_references(text):
+            parsed = urllib.parse.urlparse(raw_reference)
+            if parsed.scheme or parsed.netloc or raw_reference.startswith(("/", "\\", "data:")):
+                continue
+            reference = urllib.parse.unquote(raw_reference.split("#", 1)[0].split("?", 1)[0])
+            if not reference:
+                continue
+            target = (markdown_path.parent / reference).resolve()
+            try:
+                target.relative_to(output_root)
+            except ValueError:
+                failures.append({"title": markdown_path.name, "reference": raw_reference, "reason": "引用路径超出导出目录"})
+                continue
+            if target.is_file():
+                continue
+            candidates = [candidate for candidate in by_name.get(Path(reference).name, []) if candidate.is_file()]
+            if len(candidates) != 1:
+                reason = "找不到同名图片" if not candidates else "同名图片不唯一"
+                failures.append({"title": markdown_path.name, "reference": raw_reference, "reason": reason})
+                continue
+            source = candidates[0]
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+                by_name[Path(reference).name] = [candidate for candidate in candidates if candidate != source]
+                repaired += 1
+            except OSError as exc:
+                failures.append({"title": markdown_path.name, "reference": raw_reference, "reason": str(exc)})
+    return repaired, failures
+
+
+def _note_id_from_media_info(media_info: dict[str, Any]) -> str:
+    for key in ("note_id", "notebook_id", "doc_id", "content_id"):
+        value = media_info.get(key)
+        if value:
+            return str(value).strip()
+    for key in ("notebook_ext_info", "note_info", "ext_info"):
+        nested = media_info.get(key)
+        if isinstance(nested, dict):
+            note_id = _note_id_from_media_info(nested)
+            if note_id:
+                return note_id
+    return ""
+
+
+def _resource_warning(resource_failures: list[dict[str, str]]) -> str:
+    if not resource_failures:
+        return ""
+    hosts = sorted({item.get("host", "unknown-host") for item in resource_failures})
+    return f"{len(resource_failures)} 张图片下载失败（{', '.join(hosts[:3])}）"
+
+
+def save_note_entry(
+    client: ImaClient,
+    entry: KnowledgeEntry,
+    target_dir: Path,
+    resource_failures: list[dict[str, str]] | None = None,
+) -> Path:
     media_info = client.wiki("get_media_info", {"media_id": entry.media_id})
-    note_id = str((media_info.get("notebook_ext_info") or {}).get("notebook_id") or "")
+    note_id = _note_id_from_media_info(media_info)
     if not note_id:
         raise ImaError("笔记类型没有返回 notebook_id")
-    note_data = client.note("get_doc_content", {"note_id": note_id, "target_content_format": 0})
+    try:
+        note_data = client.note("get_doc_content", {"note_id": note_id, "target_content_format": 1})
+    except ImaError:
+        note_data = client.note("get_doc_content", {"note_id": note_id, "target_content_format": 0})
     text = extract_content_text(note_data).strip()
     if not text:
         text = f"# {entry.title}\n\n> ima 笔记接口未返回可导出的正文。"
     elif not text.lstrip().startswith("#"):
         text = f"# {entry.title}\n\n{text}\n"
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = unique_path(target_dir / f"{sanitize_filename(entry.title)}.md")
+    name = sanitize_filename(entry.title)
+    if Path(name).suffix.lower() not in {".md", ".markdown"}:
+        name += ".md"
+    target = unique_path(target_dir / name)
+    failures = resource_failures if resource_failures is not None else []
+    text, _ = localize_markdown_images(
+        text,
+        target_dir / f"{target.stem}_assets",
+        failures,
+    )
     target.write_text(text, "utf-8")
     return target
 
@@ -556,9 +868,10 @@ def save_media_entry(client: ImaClient, entry: KnowledgeEntry, output_root: Path
 
     media_info = client.wiki("get_media_info", {"media_id": entry.media_id})
     media_type = int(media_info.get("media_type") or entry.media_type or 0)
+    resource_failures: list[dict[str, str]] = []
     if media_type == 11:
-        path = save_note_entry(client, entry, target_dir)
-        return "exported_note", path, ""
+        path = save_note_entry(client, entry, target_dir, resource_failures)
+        return "exported_note", path, _resource_warning(resource_failures)
 
     url_info = media_info.get("url_info") or {}
     url = str(url_info.get("url") or "")
@@ -572,8 +885,21 @@ def save_media_entry(client: ImaClient, entry: KnowledgeEntry, output_root: Path
     if not Path(name).suffix:
         name += ext
     target = unique_path(target_dir / name)
-    target.write_bytes(content)
-    return "exported", target, ""
+    if media_type == 7 or target.suffix.lower() in {".md", ".markdown"}:
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            target.write_bytes(content)
+            return "exported", target, ""
+        text, _ = localize_markdown_images(
+            text,
+            target_dir / f"{target.stem}_assets",
+            resource_failures,
+        )
+        target.write_text(text, "utf-8")
+    else:
+        target.write_bytes(content)
+    return "exported", target, _resource_warning(resource_failures)
 
 
 def selected_entries(entries: list[KnowledgeEntry], doc_ids: list[str]) -> list[KnowledgeEntry]:
@@ -610,10 +936,16 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
             checkpoint.upsert_item(
                 f"ima:entry:{entry.export_id}",
                 title=entry.title,
-                source_url=entry.path,
+                source_url="/".join(
+                    [
+                        sanitize_filename(entry.kb_name, "knowledge-base"),
+                        *(sanitize_filename(part, "folder") for part in entry.relative_parts),
+                        sanitize_filename(entry.title),
+                    ]
+                ),
                 source_id=entry.export_id,
-                parent_key=entry.parent_id,
-                metadata={"exportId": entry.export_id, "mediaId": entry.media_id, "knowledgeBaseId": entry.knowledge_base_id},
+                parent_key=entry.parent_node_id,
+                metadata={"exportId": entry.export_id, "mediaId": entry.media_id, "knowledgeBaseId": entry.kb_id},
             )
         if getattr(args, "retry_failed", False):
             docs = [entry for entry in docs if checkpoint.item_status(f"ima:entry:{entry.export_id}") == "failed"]
@@ -621,6 +953,9 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
     exported = 0
     skipped = 0
     failures: list[dict[str, str]] = []
+    resource_failures: list[dict[str, str]] = []
+    local_reference_repairs = 0
+    local_reference_failures: list[dict[str, str]] = []
     started = time.time()
     emit(
         f"开始导出 ima 知识库内容：共 {total} 个文件。",
@@ -645,12 +980,19 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
             status, path, reason = save_media_entry(client, entry, output)
             if status.startswith("exported"):
                 exported += 1
+                if reason:
+                    resource_failures.append({"title": entry.title, "reason": reason})
                 if checkpoint:
-                    checkpoint.complete_item(item_key, local_path=str(path or ""), metadata={"exportId": entry.export_id})
+                    checkpoint.complete_item(
+                        item_key,
+                        local_path=str(path or ""),
+                        metadata={"exportId": entry.export_id, "resourceWarning": reason},
+                    )
                 emit(
                     f"ima 文件导出完成：{entry.title}",
                     event="document.export.completed",
                     doc={"id": entry.export_id, "title": entry.title, "index": index, "path": str(path)},
+                    warning=reason,
                 )
             else:
                 skipped += 1
@@ -684,8 +1026,28 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
                 f"progress {index}/{total} exported={exported} skipped={skipped} failures={len(failures)}",
                 event="task.progress",
                 progress={"current": index, "total": total},
-                stats={"exportedDocs": exported, "skippedDocs": skipped, "failureCount": len(failures)},
+                stats={
+                    "exportedDocs": exported,
+                    "skippedDocs": skipped,
+                    "failureCount": len(failures),
+                    "resourceFailureCount": len(resource_failures),
+                },
             )
+    local_reference_repairs, local_reference_failures = repair_exported_local_image_references(output)
+    for item in local_reference_failures:
+        resource_failures.append(
+            {
+                "title": item.get("title", ""),
+                "reason": f"本地图片引用未修复：{item.get('reference', '')}（{item.get('reason', '未知原因')}）",
+            }
+        )
+    if local_reference_repairs or local_reference_failures:
+        emit(
+            f"ima 本地图片引用修复完成：修复 {local_reference_repairs} 个，失败 {len(local_reference_failures)} 个",
+            event="document.export.resources_repaired",
+            level="warn" if local_reference_failures else "info",
+            stats={"repaired": local_reference_repairs, "failures": len(local_reference_failures)},
+        )
     report = {
         "provider": "ima",
         "mode": "export",
@@ -695,6 +1057,10 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
         "skippedDocs": skipped,
         "failureCount": len(failures),
         "failures": failures[:20],
+        "resourceFailureCount": len(resource_failures),
+        "resourceFailures": resource_failures[:20],
+        "localImageReferenceRepairs": local_reference_repairs,
+        "localImageReferenceFailures": local_reference_failures[:20],
         "output": str(output),
         "elapsedSeconds": round(time.time() - started, 1),
         "requestCount": int(getattr(args, "_request_count", 0) or 0),
@@ -712,7 +1078,14 @@ def export_selected(client: ImaClient, args: argparse.Namespace) -> dict[str, An
         "ima 导出完成" if not failures else f"ima 导出完成，但有 {len(failures)} 个失败项",
         event="task.completed",
         level="success" if not failures else "warn",
-        stats={"exportedDocs": exported, "skippedDocs": skipped, "failureCount": len(failures)},
+        stats={
+            "exportedDocs": exported,
+            "skippedDocs": skipped,
+            "failureCount": len(failures),
+            "resourceFailureCount": len(resource_failures),
+            "localImageReferenceRepairs": local_reference_repairs,
+            "localImageReferenceFailures": len(local_reference_failures),
+        },
     )
     return report
 
@@ -935,6 +1308,52 @@ def upload_to_cos(path: Path, credential: dict[str, Any], content_type: str) -> 
         raise ImaError(f"COS 上传失败：{exc}") from exc
 
 
+def upload_markdown_note(
+    client: ImaClient,
+    args: argparse.Namespace,
+    path: Path,
+    source_root: Path,
+    resource_failures: list[dict[str, str]],
+) -> str:
+    kb_id = args.knowledge_base_id
+    if not kb_id:
+        raise ImaError("导入需要填写目标知识库 ID")
+    file_name = path.name
+    if args.skip_existing and is_repeated(client, kb_id, args.folder_id or "", file_name, 11):
+        return "skipped_existing"
+    try:
+        content = path.read_text("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ImaError(f"Markdown 不是有效 UTF-8：{path.name}") from exc
+    content, embedded = embed_local_markdown_images(content, path, source_root, resource_failures)
+    created = client.note(
+        "import_doc",
+        {
+            "title": file_name,
+            "content": content,
+            "content_format": 1,
+        },
+    )
+    note_id = _note_id_from_media_info(created)
+    if not note_id:
+        raise ImaError("import_doc 未返回 note_id")
+    add_payload: dict[str, Any] = {
+        "media_type": 11,
+        "title": file_name,
+        "knowledge_base_id": kb_id,
+        "note_info": {"content_id": note_id},
+    }
+    if args.folder_id:
+        add_payload["folder_id"] = args.folder_id
+    client.wiki("add_knowledge", add_payload)
+    emit(
+        f"Markdown 笔记已导入：{file_name}（内嵌图片 {embedded} 张）",
+        event="document.import.resources_embedded",
+        stats={"embeddedImages": embedded},
+    )
+    return note_id
+
+
 def upload_file(client: ImaClient, args: argparse.Namespace, path: Path) -> str:
     kb_id = args.knowledge_base_id
     if not kb_id:
@@ -998,6 +1417,7 @@ def import_files(client: ImaClient, args: argparse.Namespace) -> dict[str, Any]:
     imported = 0
     skipped = 0
     failures: list[dict[str, str]] = []
+    resource_failures: list[dict[str, str]] = []
     started = time.time()
     total = len(files)
     emit(
@@ -1016,7 +1436,13 @@ def import_files(client: ImaClient, args: argparse.Namespace) -> dict[str, Any]:
                 event="document.import.started",
                 doc={"path": relative_path, "index": index},
             )
-            result = upload_file(client, args, path)
+            file_resources: list[dict[str, str]] = []
+            if path.suffix.lower() in {".md", ".markdown"}:
+                result = upload_markdown_note(client, args, path, source_dir, file_resources)
+            else:
+                result = upload_file(client, args, path)
+            for item in file_resources:
+                resource_failures.append({"relativePath": relative_path, **item})
             if result == "skipped_existing":
                 skipped += 1
             else:
@@ -1041,7 +1467,12 @@ def import_files(client: ImaClient, args: argparse.Namespace) -> dict[str, Any]:
                 f"progress {index}/{total} imported={imported} skipped={skipped} failures={len(failures)}",
                 event="task.progress",
                 progress={"current": index, "total": total},
-                stats={"importedDocs": imported, "skippedDocs": skipped, "failureCount": len(failures)},
+                stats={
+                    "importedDocs": imported,
+                    "skippedDocs": skipped,
+                    "failureCount": len(failures),
+                    "resourceFailureCount": len(resource_failures),
+                },
             )
     report = {
         "provider": "ima",
@@ -1054,6 +1485,8 @@ def import_files(client: ImaClient, args: argparse.Namespace) -> dict[str, Any]:
         "skippedFiles": skipped,
         "failureCount": len(failures),
         "failures": failures[:20],
+        "resourceFailureCount": len(resource_failures),
+        "resourceFailures": resource_failures[:20],
         "elapsedSeconds": round(time.time() - started, 1),
         "requestCount": int(getattr(args, "_request_count", 0) or 0),
     }
@@ -1062,7 +1495,12 @@ def import_files(client: ImaClient, args: argparse.Namespace) -> dict[str, Any]:
         "ima 导入完成" if not failures else f"ima 导入完成，但有 {len(failures)} 个失败项",
         event="task.completed",
         level="success" if not failures else "warn",
-        stats={"importedDocs": imported, "skippedDocs": skipped, "failureCount": len(failures)},
+        stats={
+            "importedDocs": imported,
+            "skippedDocs": skipped,
+            "failureCount": len(failures),
+            "resourceFailureCount": len(resource_failures),
+        },
     )
     return report
 
@@ -1095,7 +1533,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--source-dir", help="本地待导入目录")
     parser.add_argument("--source-file", help="单篇测试文件")
     parser.add_argument("--scan-source", action="store_true", help="扫描本地可导入文件")
-    parser.add_argument("--include-referenced-assets", action="store_true", help="将 Markdown 引用的本地图片/附件也作为独立文件上传")
+    parser.add_argument(
+        "--include-referenced-assets",
+        dest="include_referenced_assets",
+        action="store_true",
+        default=False,
+        help="将 Markdown 引用的本地图片/附件也作为独立文件上传（默认关闭；图片会内嵌到 Markdown 笔记）",
+    )
+    parser.add_argument(
+        "--exclude-referenced-assets",
+        dest="include_referenced_assets",
+        action="store_false",
+        help="不单独上传 Markdown 引用的本地图片/附件",
+    )
     parser.add_argument("--import-one", action="store_true", help="导入第一篇或 source-file")
     parser.add_argument("--import-all", action="store_true", help="批量导入")
     parser.add_argument("--skip-existing", action="store_true", default=True, help="目标已有同名文件时跳过")
