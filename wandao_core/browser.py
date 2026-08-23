@@ -327,6 +327,12 @@ def find_chrome(explicit_path: str | None = None) -> str | None:
         str(Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        str(Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"),
+        str(Path.home() / "Applications" / "Microsoft Edge.app" / "Contents" / "MacOS" / "Microsoft Edge"),
+        str(Path.home() / "Applications" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"),
+        str(Path.home() / "Applications" / "Brave Browser.app" / "Contents" / "MacOS" / "Brave Browser"),
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         "/usr/bin/google-chrome",
         "/usr/bin/chromium",
         "/usr/bin/microsoft-edge",
@@ -334,7 +340,7 @@ def find_chrome(explicit_path: str | None = None) -> str | None:
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
-    for name in ("chrome", "google-chrome", "chromium", "msedge", "microsoft-edge"):
+    for name in ("chrome", "google-chrome", "chromium", "msedge", "microsoft-edge", "brave", "brave-browser"):
         found = shutil.which(name)
         if found:
             return found

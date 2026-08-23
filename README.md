@@ -16,6 +16,7 @@
 <p align="center">
   <a href="https://github.com/tllovesxs/wandao/releases"><img src="https://img.shields.io/github/v/release/tllovesxs/wandao?label=Release&color=2f80ed" alt="最新版本"></a>
   <a href="https://github.com/tllovesxs/wandao/releases"><img src="https://img.shields.io/github/downloads/tllovesxs/wandao/total?label=Downloads&color=22a06b" alt="累计下载"></a>
+  <a href="https://github.com/tllovesxs/wandao/releases/tag/plugins-latest"><img src="https://img.shields.io/github/downloads/tllovesxs/wandao/plugins-latest/total?label=插件下载&color=7c3aed" alt="插件下载"></a>
   <a href="https://github.com/tllovesxs/wandao/stargazers"><img src="https://img.shields.io/github/stars/tllovesxs/wandao?style=flat&color=f5a623" alt="GitHub Stars"></a>
   <a href="https://github.com/tllovesxs/wandao/network/members"><img src="https://img.shields.io/github/forks/tllovesxs/wandao?label=Forks&color=4f86c6" alt="GitHub Forks"></a>
   <a href="https://github.com/tllovesxs/wandao/issues?q=is%3Aissue"><img src="https://img.shields.io/github/issues-search?query=repo%3Atllovesxs%2Fwandao%20is%3Aissue&label=Issues&color=8a63d2" alt="全部 GitHub Issues"></a>

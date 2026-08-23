@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, FilePath, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
     app_state::{is_inside, normalize_absolute, AppState, CachedRegistry},
@@ -188,7 +189,7 @@ pub async fn run_python_command(
         Err(error) => return Ok(json!({"success": false, "error": error})),
     };
     let (command_args, secrets) = extract_sensitive_arguments(compressed);
-    let browser_path = selected_browser_path(&state.paths);
+    let browser_path = effective_browser_path(&state.paths);
     let (python_executable, python_runtime) = python_command(&state.paths);
     let task_id = value_string(&options, &["task_id", "taskId"]).unwrap_or_default();
     let run_id = value_string(&options, &["run_id", "runId"]).unwrap_or_default();
@@ -420,6 +421,48 @@ pub async fn show_about(app: AppHandle) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> Result<Value, String> {
+    let current_version = app.package_info().version.to_string();
+    let updater_result = app
+        .updater()
+        .map_err(|error| format!("初始化更新器失败：{error}"))?
+        .check()
+        .await;
+    match updater_result {
+        Ok(Some(update)) => {
+            return Ok(json!({
+                "success": true,
+                "data": {
+                    "currentVersion": current_version,
+                    "latestVersion": update.version,
+                    "latestTag": format!("v{}", update.version),
+                    "releaseUrl": RELEASES_URL,
+                    "releaseName": format!("Wandao v{}", update.version),
+                    "publishedAt": update.date.map(|date| date.to_string()).unwrap_or_default(),
+                    "notes": update.body.unwrap_or_default(),
+                    "hasUpdate": true,
+                    "canInstall": true
+                }
+            }));
+        }
+        Ok(None) => {
+            return Ok(json!({
+                "success": true,
+                "data": {
+                    "currentVersion": current_version,
+                    "latestVersion": current_version,
+                    "latestTag": format!("v{}", current_version),
+                    "releaseUrl": RELEASES_URL,
+                    "releaseName": format!("Wandao v{}", current_version),
+                    "publishedAt": "",
+                    "notes": "",
+                    "hasUpdate": false,
+                    "canInstall": false
+                }
+            }));
+        }
+        Err(_) => {}
+    }
+
     let result = async {
         let bytes = fetch_limited(
             LATEST_RELEASE_API,
@@ -437,7 +480,6 @@ pub async fn check_for_updates(app: AppHandle) -> Result<Value, String> {
             .and_then(Value::as_str)
             .unwrap_or("0.0.0")
             .trim_start_matches(['v', 'V']);
-        let current_version = app.package_info().version.to_string();
         Ok::<Value, String>(json!({
             "currentVersion": current_version,
             "latestVersion": latest_version,
@@ -445,7 +487,8 @@ pub async fn check_for_updates(app: AppHandle) -> Result<Value, String> {
             "releaseUrl": release.get("html_url").cloned().unwrap_or(json!(RELEASES_URL)),
             "releaseName": release.get("name").or_else(|| release.get("tag_name")).cloned().unwrap_or(json!(latest_version)),
             "publishedAt": release.get("published_at").cloned().unwrap_or(json!("")),
-            "hasUpdate": compare_versions(latest_version, &current_version) > 0
+            "hasUpdate": compare_versions(latest_version, &current_version) > 0,
+            "canInstall": false
         }))
     }
     .await;
@@ -461,6 +504,46 @@ pub async fn get_app_settings(state: State<'_, AppState>) -> Result<Value, Strin
         "success": true,
         "settings": public_app_settings(&read_app_settings(&state.paths))
     }))
+}
+
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    runtime: State<'_, TaskRuntime>,
+) -> Result<Value, String> {
+    if runtime.state().running {
+        return Ok(json!({
+            "success": false,
+            "error": "当前有迁移任务正在运行，请先等待任务完成或停止任务后再更新。"
+        }));
+    }
+    let update = app
+        .updater()
+        .map_err(|error| format!("初始化更新器失败：{error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("检查签名更新失败：{error}"))?
+        .ok_or_else(|| "当前已经是最新版本。".to_string())?;
+    let progress_app = app.clone();
+    let mut downloaded_bytes = 0_u64;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded_bytes += chunk as u64;
+                let _ = progress_app.emit(
+                    "update-progress",
+                    json!({
+                        "phase": "downloading",
+                        "downloadedBytes": downloaded_bytes,
+                        "totalBytes": total
+                    }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| format!("下载或安装更新失败：{error}"))?;
+    app.restart();
 }
 
 #[tauri::command]
@@ -718,11 +801,37 @@ pub async fn rollback_plugin(
 
 #[tauri::command]
 pub async fn uninstall_plugin(
+    state: State<'_, AppState>,
     manager: State<'_, PluginManager>,
     plugin_id: String,
+    clear_data: Option<bool>,
 ) -> Result<Value, String> {
     Ok(match manager.uninstall(&plugin_id) {
-        Ok(removed) => json!({"success": true, "removed": removed}),
+        Ok(removed) => {
+            if removed && clear_data.unwrap_or(false) {
+                let data_root = state.paths.user_data.join("plugin-data");
+                let data_dir = data_root.join(&plugin_id);
+                if !is_inside(&data_root, &data_dir) {
+                    return Ok(json!({
+                        "success": true,
+                        "removed": true,
+                        "dataRemoved": false,
+                        "warning": "插件已卸载，但插件数据路径越界，未执行数据清理。"
+                    }));
+                }
+                if data_dir.is_dir() {
+                    if let Err(error) = fs::remove_dir_all(&data_dir) {
+                        return Ok(json!({
+                            "success": true,
+                            "removed": true,
+                            "dataRemoved": false,
+                            "warning": format!("插件已卸载，但清理插件数据失败：{error}")
+                        }));
+                    }
+                }
+            }
+            json!({"success": true, "removed": removed, "dataRemoved": clear_data.unwrap_or(false)})
+        }
         Err(error) => json!({"success": false, "error": error}),
     })
 }
@@ -889,6 +998,20 @@ fn selected_browser_path(paths: &crate::app_state::AppPaths) -> Option<PathBuf> 
         .and_then(normalize_browser_executable)
 }
 
+fn effective_browser_path(paths: &crate::app_state::AppPaths) -> Option<PathBuf> {
+    selected_browser_path(paths).or_else(|| {
+        detect_browsers_internal()
+            .into_iter()
+            .filter_map(|browser| {
+                browser
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+            })
+            .next()
+    })
+}
+
 fn normalize_browser_executable(value: &str) -> Option<PathBuf> {
     let raw = value.trim();
     if raw.is_empty() {
@@ -983,16 +1106,51 @@ fn detect_browsers_internal() -> Vec<Value> {
             }
             values
         };
+        let registry_paths = |executable: &str| {
+            use std::os::windows::process::CommandExt;
+
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let keys = [
+                format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\{executable}"),
+                format!(r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\{executable}"),
+                format!(
+                    r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\{executable}"
+                ),
+            ];
+            keys.into_iter()
+                .filter_map(|key| {
+                    let mut command = std::process::Command::new("reg");
+                    command.creation_flags(CREATE_NO_WINDOW);
+                    let output = command.args(["query", &key, "/ve"]).output().ok()?;
+                    if !output.status.success() {
+                        return None;
+                    }
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .filter_map(|line| {
+                            let parts: Vec<_> = line.split_whitespace().collect();
+                            (parts.len() >= 3 && parts[1].eq_ignore_ascii_case("REG_SZ"))
+                                .then(|| parts[2..].join(" "))
+                        })
+                        .map(|value| PathBuf::from(value.trim_matches('"')))
+                        .find(|path| path.is_file())
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut chrome_paths = paths(&["Google", "Chrome", "Application", "chrome.exe"]);
+        chrome_paths.extend(registry_paths("chrome.exe"));
+        let mut edge_paths = paths(&["Microsoft", "Edge", "Application", "msedge.exe"]);
+        edge_paths.extend(registry_paths("msedge.exe"));
         specs.push((
             "chrome",
             "Google Chrome",
-            paths(&["Google", "Chrome", "Application", "chrome.exe"]),
+            chrome_paths,
             vec!["chrome", "chrome.exe", "google-chrome"],
         ));
         specs.push((
             "edge",
             "Microsoft Edge",
-            paths(&["Microsoft", "Edge", "Application", "msedge.exe"]),
+            edge_paths,
             vec!["msedge", "msedge.exe"],
         ));
         specs.push((

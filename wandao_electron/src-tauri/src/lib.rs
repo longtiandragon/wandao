@@ -42,6 +42,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(app_menu::build)
         .on_menu_event(app_menu::handle)
         .setup(|app| {
@@ -74,6 +75,7 @@ pub fn run() {
             commands::open_external,
             commands::show_about,
             commands::check_for_updates,
+            commands::install_update,
             commands::get_app_settings,
             commands::save_app_settings,
             commands::detect_browsers,

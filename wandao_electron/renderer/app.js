@@ -154,6 +154,7 @@ let pythonLogSummaryBuffer = '';
 let pythonLogProcessor = null;
 let progressVisible = false;
 let latestReleaseUrl = 'https://github.com/tllovesxs/wandao/releases/latest';
+let updateInstalling = false;
 let latestYuqueImportReportFile = '';
 let noticeCenterState = {
   status: 'idle',
@@ -487,7 +488,15 @@ function showUpdateBanner(info) {
   latestReleaseUrl = info.releaseUrl || latestReleaseUrl;
   const latestLabel = info.latestTag || (info.latestVersion ? `v${info.latestVersion}` : '-');
   document.getElementById('update-title').textContent = `发现新版本：${latestLabel}`;
-  document.getElementById('update-detail').textContent = `当前版本 v${info.currentVersion || '-'}，最新版本 ${latestLabel}。建议前往 Releases 下载新版。`;
+  document.getElementById('update-detail').textContent = info.canInstall
+    ? `当前版本 v${info.currentVersion || '-'}，最新版本 ${latestLabel}。可在应用内下载并安装。`
+    : `当前版本 v${info.currentVersion || '-'}，最新版本 ${latestLabel}。请前往 Releases 下载新版。`;
+  const installButton = document.getElementById('btn-install-update');
+  if (installButton) {
+    installButton.hidden = !info.canInstall;
+    installButton.disabled = updateInstalling;
+    installButton.textContent = updateInstalling ? '更新中…' : '下载并安装';
+  }
   banner.hidden = false;
 }
 
@@ -521,7 +530,9 @@ async function checkForUpdates(silent = false) {
       showUpdateBanner(info);
       log(`发现新版本：v${info.latestVersion}，当前版本：v${info.currentVersion}`, 'success');
       if (!silent) {
-        alert(`发现新版本 v${info.latestVersion}，可以点击顶部提示前往下载。`);
+        alert(info.canInstall
+          ? `发现新版本 v${info.latestVersion}，可以在顶部提示中下载安装。`
+          : `发现新版本 v${info.latestVersion}，请点击顶部提示打开下载页。`);
       }
     } else if (!silent) {
       hideUpdateBanner();
@@ -538,6 +549,38 @@ async function checkForUpdates(silent = false) {
       button.disabled = false;
       button.textContent = '检查更新';
     }
+  }
+}
+
+async function installUpdate() {
+  if (!window.electronAPI.installUpdate) {
+    alert('当前版本暂不支持程序内更新，请前往 Releases 下载。');
+    return;
+  }
+  if (isRunning || mainPythonProcessState.running) {
+    alert('当前有迁移任务正在运行，请先等待任务完成或停止任务后再更新。');
+    return;
+  }
+  const button = document.getElementById('btn-install-update');
+  updateInstalling = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = '准备更新…';
+  }
+  const detail = document.getElementById('update-detail');
+  if (detail) detail.textContent = '正在准备签名校验和更新下载…';
+  try {
+    const result = await window.electronAPI.installUpdate();
+    if (!result?.success) throw new Error(result?.error || '程序更新失败');
+  } catch (error) {
+    updateInstalling = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = '下载并安装';
+    }
+    if (detail) detail.textContent = `更新失败：${formatError(error)}`;
+    log(`程序更新失败：${formatError(error)}`, 'error');
+    alert(`程序更新失败：${formatError(error)}`);
   }
 }
 
@@ -3173,6 +3216,8 @@ async function installPluginFromCatalog(plugin) {
 
 async function runPluginCenterAction(action, pluginId, button) {
   button.disabled = true;
+  const originalButtonText = button.textContent;
+  if (action === 'uninstall') button.textContent = '卸载中…';
   try {
     let result;
     const plugin = pluginCatalogState.plugins.find((item) => item.id === pluginId);
@@ -3188,17 +3233,26 @@ async function runPluginCenterAction(action, pluginId, button) {
       result = await window.electronAPI.rollbackPlugin(pluginId);
     } else if (action === 'uninstall') {
       if (!confirm(`卸载插件“${plugin?.name || pluginId}”？插件生成的导出文件不会删除。`)) return;
-      result = await window.electronAPI.uninstallPlugin(pluginId);
+      const clearData = confirm('是否同时删除这个插件保存的登录凭证、配置和缓存？\n\n选择“取消”只删除插件本体，保留以后可能需要的配置。');
+      result = await window.electronAPI.uninstallPlugin(pluginId, clearData);
     }
     if (!result?.success) throw new Error(result?.error || '插件操作失败');
+    if (action === 'uninstall' && result.removed === false) {
+      throw new Error('没有找到可卸载的插件版本；如果这是随主程序提供的平台，它会继续保留为内置插件。');
+    }
+    if (result.warning) {
+      log(`插件操作提醒：${result.warning}`, 'warn');
+      alert(result.warning);
+    }
     log(`插件操作完成：${plugin?.name || pluginId}`, 'success');
     await refreshProvidersAfterPluginChange();
-    await loadPluginCatalog(true);
+    await loadPluginCatalog(action === 'uninstall' ? false : true);
   } catch (error) {
     log(`插件操作失败：${formatError(error)}`, 'error');
     alert(formatError(error));
   } finally {
     button.disabled = false;
+    button.textContent = originalButtonText;
   }
 }
 
@@ -7057,6 +7111,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('btn-theme-toggle')?.addEventListener('click', toggleTheme);
   document.getElementById('btn-check-update')?.addEventListener('click', () => checkForUpdates(false));
+  document.getElementById('btn-star-project')?.addEventListener('click', () => {
+    window.electronAPI.openExternal(GITHUB_REPO_URL);
+  });
+  document.getElementById('btn-install-update')?.addEventListener('click', installUpdate);
   document.getElementById('btn-open-release')?.addEventListener('click', () => {
     window.electronAPI.openExternal(latestReleaseUrl);
   });
@@ -7075,6 +7133,19 @@ document.addEventListener('DOMContentLoaded', () => {
   if (window.electronAPI.onAppInfo) {
     window.electronAPI.onAppInfo((message) => {
       log(message, 'success');
+    });
+  }
+  if (window.electronAPI.onUpdateProgress) {
+    window.electronAPI.onUpdateProgress((payload) => {
+      const detail = document.getElementById('update-detail');
+      if (!detail || payload?.phase !== 'downloading') return;
+      const downloaded = Number(payload.downloadedBytes || 0);
+      const total = Number(payload.totalBytes || 0);
+      if (total > 0) {
+        detail.textContent = `正在下载更新… ${Math.min(100, Math.round((downloaded / total) * 100))}%`;
+      } else {
+        detail.textContent = `正在下载更新… ${(downloaded / 1024 / 1024).toFixed(1)} MB`;
+      }
     });
   }
 });

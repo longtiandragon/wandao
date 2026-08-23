@@ -35,7 +35,7 @@ function settleAsyncWork() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test('Tauri bridge exposes all 32 Electron-compatible commands', () => {
+test('Tauri bridge exposes all Electron-compatible commands', () => {
   const loaded = loadBridge({
     __TAURI__: {
       core: { invoke: async () => null },
@@ -43,11 +43,11 @@ test('Tauri bridge exposes all 32 Electron-compatible commands', () => {
     }
   });
   try {
-    assert.equal(loaded.bridge.COMMAND_NAMES.length, 32);
+    assert.equal(loaded.bridge.COMMAND_NAMES.length, 33);
     for (const command of loaded.bridge.COMMAND_NAMES) {
       assert.match(command, /^[a-z][a-z0-9_]*$/);
     }
-    assert.equal(Object.keys(loaded.window.electronAPI).length, 36);
+    assert.equal(Object.keys(loaded.window.electronAPI).length, 38);
   } finally {
     loaded.restore();
   }

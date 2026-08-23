@@ -27,6 +27,7 @@
     'copy_text',
     'show_about',
     'check_for_updates',
+    'install_update',
     'get_app_settings',
     'save_app_settings',
     'detect_browsers',
@@ -46,7 +47,8 @@
     onAppInfo: 'app-info',
     onPythonLog: 'python-log',
     onPythonProcessState: 'python-process-state',
-    onPluginDownloadProgress: 'plugin-download-progress'
+    onPluginDownloadProgress: 'plugin-download-progress',
+    onUpdateProgress: 'update-progress'
   });
 
   function unavailableError(operation) {
@@ -161,6 +163,7 @@
       copyText: (text) => invokeCommand('copy_text', { text }),
       showAbout: () => invokeCommand('show_about'),
       checkForUpdates: () => invokeCommand('check_for_updates'),
+      installUpdate: () => invokeCommand('install_update'),
       getAppSettings: () => invokeCommand('get_app_settings'),
       saveAppSettings: (settings) => invokeCommand('save_app_settings', { settings }),
       detectBrowsers: () => invokeCommand('detect_browsers'),
@@ -174,7 +177,7 @@
       installPluginFile: () => invokeCommand('install_plugin_file'),
       setPluginEnabled: (pluginId, enabled) => invokeCommand('set_plugin_enabled', { pluginId, enabled }),
       rollbackPlugin: (pluginId) => invokeCommand('rollback_plugin', { pluginId }),
-      uninstallPlugin: (pluginId) => invokeCommand('uninstall_plugin', { pluginId }),
+      uninstallPlugin: (pluginId, clearData = false) => invokeCommand('uninstall_plugin', { pluginId, clearData }),
       getPluginUi: (pluginId, entry) => invokeCommand('get_plugin_ui', { pluginId, entry }),
 
       getAppPath: () => invokeCommand('get_app_path'),
@@ -182,7 +185,8 @@
       onAppInfo: (callback) => subscribe(EVENT_NAMES.onAppInfo, callback),
       onPythonLog: (callback) => subscribe(EVENT_NAMES.onPythonLog, callback),
       onPythonProcessState: (callback) => subscribe(EVENT_NAMES.onPythonProcessState, callback),
-      onPluginDownloadProgress: (callback) => subscribe(EVENT_NAMES.onPluginDownloadProgress, callback)
+      onPluginDownloadProgress: (callback) => subscribe(EVENT_NAMES.onPluginDownloadProgress, callback),
+      onUpdateProgress: (callback) => subscribe(EVENT_NAMES.onUpdateProgress, callback)
     });
   }
 

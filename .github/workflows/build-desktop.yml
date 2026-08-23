@@ -268,11 +268,13 @@ jobs:
           - name: Windows x64
             os: windows-latest
             unsigned_command: npm run build:win:unsigned
+            release_command: npm run build:win:release
             artifact: wandao-Windows-x64
             rust_target: x86_64-pc-windows-msvc
           - name: macOS Apple-Silicon
             os: macos-15
             unsigned_command: npm run build:mac:arm64:unsigned
+            release_command: npm run build:mac:arm64:release
             artifact: wandao-macOS-arm64
             rust_target: aarch64-apple-darwin
 
@@ -327,8 +329,17 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Build unsigned desktop package
+        if: github.ref_type != 'tag'
         working-directory: wandao_electron
         run: ${{ matrix.unsigned_command }}
+
+      - name: Build signed updater package
+        if: github.ref_type == 'tag'
+        working-directory: wandao_electron
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: ${{ matrix.release_command }}
 
       - name: Smoke test Windows installer
         if: runner.os == 'Windows'
@@ -368,6 +379,13 @@ jobs:
           $version = (Get-Content wandao_electron/package.json | ConvertFrom-Json).version
           $suffix = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") { "UNSIGNED-SMOKE" } else { "setup" }
           Copy-Item $source.FullName "release-output/Wandao-$version-win-x64-$suffix.exe"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $updater = Get-ChildItem wandao_electron/src-tauri/target/release/bundle/nsis -File | Where-Object { $_.Extension -eq '.exe' -and (Test-Path -LiteralPath "$($_.FullName).sig") } | Select-Object -First 1
+            if (-not $updater) { throw "Tauri Windows updater archive was not generated" }
+            Copy-Item $updater.FullName "release-output/$($updater.Name)"
+            if (-not (Test-Path -LiteralPath "$($updater.FullName).sig")) { throw "Tauri Windows updater signature was not generated" }
+            Copy-Item "$($updater.FullName).sig" "release-output/$($updater.Name).sig"
+          }
 
       - name: Prepare macOS release file
         if: runner.os == 'macOS'
@@ -383,6 +401,13 @@ jobs:
             output="release-output/Wandao-${version}-macOS-arm64.zip"
           fi
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$output"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            updater="$(find wandao_electron/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+            test -n "$updater"
+            cp "$updater" "release-output/$(basename "$updater")"
+            test -f "$updater.sig"
+            cp "$updater.sig" "release-output/$(basename "$updater").sig"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -410,6 +435,13 @@ jobs:
 
       - name: List release files
         run: find release-artifacts -type f
+
+      - name: Generate updater manifest
+        run: |
+          python scripts/build_updater_manifest.py \
+            --directory release-artifacts \
+            --tag "${GITHUB_REF_NAME}" \
+            --output release-artifacts/latest.json
 
       - name: Generate release SBOM
         uses: anchore/sbom-action@v0
@@ -439,5 +471,8 @@ jobs:
           files: |
             release-artifacts/*.exe
             release-artifacts/*.zip
+            release-artifacts/*.tar.gz
+            release-artifacts/*.sig
+            release-artifacts/latest.json
             release-artifacts/SHA256SUMS
             release-artifacts/wandao.spdx.json
