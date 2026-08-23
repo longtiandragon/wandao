@@ -397,6 +397,11 @@ def find_chrome(explicit_path: str | None = None) -> str | None:
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        str(Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"),
+        str(Path.home() / "Applications" / "Microsoft Edge.app" / "Contents" / "MacOS" / "Microsoft Edge"),
+        str(Path.home() / "Applications" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"),
+        str(Path.home() / "Applications" / "Brave Browser.app" / "Contents" / "MacOS" / "Brave Browser"),
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
         "/usr/bin/chromium",
@@ -419,6 +424,8 @@ def find_chrome(explicit_path: str | None = None) -> str | None:
         "msedge.exe",
         "microsoft-edge",
         "microsoft-edge-stable",
+        "brave",
+        "brave-browser",
     ):
         found = shutil.which(name)
         if found:

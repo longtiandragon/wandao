@@ -256,6 +256,24 @@ select:focus-visible,
   line-height: 1.16;
 }
 
+.star-support {
+  margin-left: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--shell-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-raise) 72%, transparent);
+  color: var(--shell-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.star-support:hover {
+  border-color: var(--brand-line);
+  background: var(--brand-soft);
+  color: var(--shell-text);
+}
+
 .app-header h1 {
   overflow: hidden;
   color: var(--shell-text);
@@ -292,6 +310,10 @@ select:focus-visible,
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.star-support + .header-actions {
+  margin-left: 12px;
 }
 
 .workspace {
@@ -2696,6 +2718,19 @@ button,
 
   .subtitle {
     display: none;
+  }
+
+  .star-support {
+    max-width: 150px;
+    overflow: hidden;
+    margin-left: 8px;
+    padding: 7px 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .star-support + .header-actions {
+    margin-left: 8px;
   }
 
   .workspace {

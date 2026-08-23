@@ -21,7 +21,7 @@ class MacosReleaseContractTests(unittest.TestCase):
         self.assertEqual(package["version"], tauri["version"])
         self.assertEqual(package["version"], cargo_version.group(1))
 
-    def test_apple_silicon_release_alias_is_explicitly_unsigned(self) -> None:
+    def test_apple_silicon_release_keeps_app_unsigned_and_enables_updater(self) -> None:
         package = json.loads((REPO_ROOT / "wandao_electron/package.json").read_text(encoding="utf-8"))
         tauri = json.loads(
             (REPO_ROOT / "wandao_electron/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
@@ -32,22 +32,25 @@ class MacosReleaseContractTests(unittest.TestCase):
         unsigned_build = package["scripts"]["build:mac:arm64:unsigned"]
         release_build = package["scripts"]["build:mac:arm64:release"]
         self.assertIn("--no-sign", unsigned_build)
-        self.assertEqual(release_build, "npm run build:mac:arm64:unsigned")
+        self.assertIn("--ci", release_build)
+        self.assertIn("tauri.release.conf.json", release_build)
         self.assertIn("--target aarch64-apple-darwin", unsigned_build)
         self.assertIn("--bundles app", unsigned_build)
 
-    def test_tag_release_publishes_unsigned_artifacts_without_signing_credentials(self) -> None:
+    def test_tag_release_signs_updater_artifacts_without_commercial_code_signing(self) -> None:
         package = json.loads((REPO_ROOT / "wandao_electron/package.json").read_text(encoding="utf-8"))
         workflow = (REPO_ROOT / ".github/workflows/build-desktop.yml").read_text(encoding="utf-8")
         release_job = workflow.split("\n  release:\n", 1)[1]
 
-        self.assertEqual(package["scripts"]["build:win:release"], "npm run build:win:unsigned")
-        self.assertEqual(
-            package["scripts"]["build:mac:arm64:release"],
-            "npm run build:mac:arm64:unsigned",
-        )
-        self.assertIn("Build ${{ matrix.name }} (unsigned)", workflow)
-        self.assertIn("run: ${{ matrix.unsigned_command }}", workflow)
+        self.assertIn("--ci", package["scripts"]["build:win:release"])
+        self.assertIn("tauri.release.conf.json", package["scripts"]["build:win:release"])
+        self.assertIn("--ci", package["scripts"]["build:mac:arm64:release"])
+        self.assertIn("tauri.release.conf.json", package["scripts"]["build:mac:arm64:release"])
+        self.assertIn("Build signed updater package", workflow)
+        self.assertIn("run: ${{ matrix.release_command }}", workflow)
+        self.assertIn("secrets.TAURI_SIGNING_PRIVATE_KEY", workflow)
+        self.assertIn("release-artifacts/latest.json", release_job)
+        self.assertIn("release-artifacts/*.sig", release_job)
         self.assertNotIn("desktop-release", workflow)
         for secret in (
             "WINDOWS_CERTIFICATE",
