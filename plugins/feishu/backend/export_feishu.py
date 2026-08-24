@@ -931,66 +931,292 @@ async (fallbackTitle) => {
       || document.querySelector(".root-render-unit-container")
       || document.querySelector(".page-main-item.editor")
       || document.querySelector(".editor-container");
-    return [...(root ? root.children : [])].filter(el => el.getAttribute && el.getAttribute("data-block-type"));
+    if (!root) return [];
+    // Prefer direct children of the render-unit wrapper — that is the pre-#129
+    // behaviour that successfully collected content. Also accept nested
+    // top-level blocks under intermediate wrappers, but only when the direct-
+    // child path would otherwise return nothing. Never use Element.closest()
+    // here: Feishu shell nodes may also carry data-block-type and would filter
+    // every real content block out (empty exports).
+    const direct = [...root.children].filter(el => el.getAttribute && el.getAttribute("data-block-type"));
+    if (direct.length) return direct;
+    const all = [...root.querySelectorAll("[data-block-type]")];
+    if (!all.length) return [];
+    const topLevel = all.filter((el) => {
+      let parent = el.parentElement;
+      while (parent && parent !== root) {
+        if (parent.getAttribute && parent.getAttribute("data-block-type")) return false;
+        parent = parent.parentElement;
+      }
+      return true;
+    });
+    // If nesting filters everything away (e.g. a shell data-block-type wraps
+    // the whole tree), fall back to the raw query so we still export something.
+    return topLevel.length ? topLevel : all;
   }
+
+  /* feishu-scroll-api:start */
+  function resolveFeishuDocScroller(root, doc) {
+    const ownerDocument = doc || document;
+    const candidates = [];
+    const pushUnique = (el) => {
+      if (el && !candidates.includes(el)) candidates.push(el);
+    };
+    // 1) Ancestors of the editor root.
+    let el = root;
+    while (el && el !== ownerDocument.body) {
+      pushUnique(el);
+      el = el.parentElement;
+    }
+    // 2) Known Feishu doc shells near the editor (short allowlist).
+    const shell = (root && root.closest)
+      ? (root.closest(".page-main") || root.closest(".editor-container") || root.closest(".wiki-main") || root)
+      : root;
+    const allowlistRoots = [shell, ownerDocument].filter(Boolean);
+    for (const scope of allowlistRoots) {
+      try {
+        for (const node of scope.querySelectorAll(".page-main, .editor-container, [class*=\"scroll\"]")) {
+          pushUnique(node);
+        }
+      } catch (_) {}
+    }
+    const isScrollbarChrome = (el) => {
+      const cls = String(el.className || "").toLowerCase();
+      if (cls.includes("scrollbar-container")) return true;
+      return false;
+    };
+    const acceptsScroll = (el) => {
+      if (isScrollbarChrome(el)) return false;
+      let style;
+      try { style = getComputedStyle(el); } catch (_) { return false; }
+      if (!/(auto|scroll)/.test(style.overflowY || "")) return false;
+      const maxScroll = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+      if (maxScroll <= 0) return false;
+      const original = el.scrollTop || 0;
+      const probe = Math.min(64, maxScroll);
+      try {
+        el.scrollTop = probe;
+        const accepted = Math.abs((el.scrollTop || 0) - original) > 0.5;
+        el.scrollTop = original;
+        return accepted;
+      } catch (_) {
+        try { el.scrollTop = original; } catch (__) {}
+        return false;
+      }
+    };
+    const containsContent = (el) => Boolean(
+      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
+    );
+    const active = candidates.filter(acceptsScroll);
+    // Prefer a scroller that actually contains document blocks (the deepest,
+    // nearest the editor root). Skip scrollbar chrome like .scrollbar-container.
+    const withContent = active.filter(containsContent);
+    const pool = withContent.length ? withContent : active;
+    return pool[0] || ownerDocument.scrollingElement || ownerDocument.documentElement;
+  }
+
+  async function collectFeishuDocBlocks(options) {
+    const {
+      root,
+      scroller,
+      document: doc,
+      sleep,
+      currentBlocks: listBlocks,
+      renderBlock: renderOne,
+      maxIterations = 180,
+    } = options;
+    const ownerDoc = doc || document;
+    const win = (ownerDoc.defaultView) || (typeof window !== "undefined" ? window : null);
+    // seen: key -> index in rendered; remounts may upgrade a block in place.
+    const seen = new Map();
+    const rendered = [];
+    const keyFor = (block) => block.getAttribute("data-record-id")
+      || block.getAttribute("data-block-id")
+      || `${block.getAttribute("data-block-type")}:${clean(block.innerText || block.textContent || "").slice(0, 80)}`;
+    const collect = () => {
+      let changed = 0;
+      for (const block of listBlocks()) {
+        const key = keyFor(block);
+        if (!key) continue;
+        const md = renderOne(block);
+        if (!md) continue;
+        if (seen.has(key)) {
+          const index = seen.get(key);
+          if (md.length > rendered[index].length) {
+            rendered[index] = md;
+            changed += 1;
+          }
+        } else {
+          seen.set(key, rendered.length);
+          rendered.push(md);
+          changed += 1;
+        }
+      }
+      return changed;
+    };
+    // Discover every element that can currently scroll. Feishu often keeps the
+    // real virtual-list scroller nested; the first document after navigate may
+    // respond to window scroll while later documents only respond to an inner
+    // pane. Re-scanning each iteration avoids "first doc scrolls, rest don't".
+    const findScrollables = () => {
+      const out = [];
+      const push = (el) => {
+        if (!el || out.includes(el)) return;
+        const cls = String(el.className || "").toLowerCase();
+        if (cls.includes("scrollbar-container")) return;
+        let style;
+        try { style = getComputedStyle(el); } catch (_) { return; }
+        if (!/(auto|scroll)/.test(style.overflowY || "")) return;
+        const maxScroll = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+        if (maxScroll <= 0) return;
+        out.push(el);
+      };
+      let el = root;
+      while (el && el !== ownerDoc.body) {
+        push(el);
+        el = el.parentElement;
+      }
+      push(scroller);
+      push(ownerDoc.scrollingElement);
+      push(ownerDoc.documentElement);
+      push(ownerDoc.body);
+      try {
+        for (const node of ownerDoc.querySelectorAll("[class*=\"scroll\"], .page-main, .editor-container, .wiki-main")) {
+          push(node);
+        }
+      } catch (_) {}
+      return out;
+    };
+    const containsContent = (el) => Boolean(
+      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
+    );
+    const stepScrollables = (scrollables) => {
+      for (const el of scrollables) {
+        try {
+          const viewport = el.clientHeight || (win && win.innerHeight) || 600;
+          const maxY = Math.max(0, (el.scrollHeight || 0) - viewport);
+          if (maxY <= 0) continue;
+          const before = el.scrollTop || 0;
+          const step = Math.max(240, Math.floor(viewport * 0.75));
+          // Even when already at the bottom, re-assign scrollTop = maxY so
+          // Feishu's lazy-mount listeners (and our test fixtures) fire again
+          // after height growth.
+          const target = before >= maxY - 2 ? maxY : Math.min(maxY, before + step);
+          el.scrollTop = target;
+          try { el.dispatchEvent(new Event("scroll", {bubbles: true})); } catch (_) {}
+        } catch (_) {}
+      }
+      // Always also scroll the last mounted block into view — this scrolls every
+      // real ancestor the browser knows about, even ones we failed to list.
+      try {
+        const blocks = listBlocks();
+        const last = blocks[blocks.length - 1];
+        if (last && last.scrollIntoView) last.scrollIntoView({ block: "end", inline: "nearest" });
+      } catch (_) {}
+    };
+    // Only require content-bearing scrollers to be at bottom. Outer window /
+    // shell panes often stay "not at bottom" forever and caused a full 180-iter
+    // stall + false incomplete after the real doc body was already collected.
+    const contentAtBottom = (scrollables) => {
+      const content = scrollables.filter(containsContent);
+      const pool = content.length ? content : scrollables;
+      if (!pool.length) return false;
+      return pool.every((el) => {
+        try {
+          const maxY = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
+          return maxY <= 0 || (el.scrollTop || 0) >= maxY - 2;
+        } catch (_) { return true; }
+      });
+    };
+    const maxScrollHeight = (scrollables) => {
+      let best = 0;
+      for (const el of scrollables) {
+        try { best = Math.max(best, el.scrollHeight || 0); } catch (_) {}
+      }
+      return best;
+    };
+    const resetScroll = (scrollables) => {
+      for (const el of scrollables) {
+        try { el.scrollTop = 0; } catch (_) {}
+      }
+      try { if (win) win.scrollTo(0, 0); } catch (_) {}
+    };
+
+    // Start at top, collect the first viewport, then keep stepping EVERY
+    // scrollable until no new blocks / height growth for several rounds while
+    // the content scroller is at bottom. Do NOT treat scrollTop motion alone
+    // as progress — that kept the loop alive after the doc was already done.
+    let scrollables = findScrollables();
+    resetScroll(scrollables);
+    await sleep(220);
+    collect();
+    let stable = 0;
+    let scrollIterations = 0;
+    let finalScrollHeight = 0;
+    let reachedBottom = false;
+    for (let i = 0; i < maxIterations; i++) {
+      scrollIterations = i + 1;
+      scrollables = findScrollables();
+      const heightBefore = maxScrollHeight(scrollables);
+      stepScrollables(scrollables);
+      const atBottom = contentAtBottom(scrollables);
+      await sleep(atBottom ? 180 : 280);
+      const changed = collect();
+      finalScrollHeight = maxScrollHeight(scrollables);
+      const progressed = changed > 0 || finalScrollHeight > heightBefore + 2;
+      if (progressed) stable = 0;
+      else stable += 1;
+      if (atBottom) reachedBottom = true;
+      if (stable >= 3 && atBottom) break;
+    }
+    resetScroll(scrollables);
+    return {
+      rendered,
+      blockCount: rendered.length,
+      scrollIterations,
+      finalScrollHeight,
+      reachedBottom,
+      hitIterationCeiling: scrollIterations >= maxIterations,
+    };
+  }
+
+  const api = { resolveFeishuDocScroller, collectFeishuDocBlocks };
+  if (typeof globalThis !== "undefined") globalThis.__feishuConverterScrollApi = api;
+  /* feishu-scroll-api:end */
+
   const pageTitle = clean((document.querySelector(".page-block-content") || {}).innerText || fallbackTitle || document.title.replace(/\s*-\s*飞书云文档\s*$/, ""));
   const initialRoot = document.querySelector(".root-render-unit-container")
     || document.querySelector(".page-main-item.editor")
     || document.querySelector(".editor-container")
     || document.body;
-  function findScroller(root) {
-    let el = root;
-    while (el && el !== document.body) {
-      const style = getComputedStyle(el);
-      if (el.scrollHeight > el.clientHeight + 30 && /(auto|scroll)/.test(style.overflowY)) return el;
-      el = el.parentElement;
-    }
-    return document.scrollingElement || document.documentElement;
-  }
-  const scroller = findScroller(initialRoot);
-  const scrollWindow = scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
-  function setScroll(y) {
-    if (scrollWindow) window.scrollTo(0, y);
-    else {
-      scroller.scrollTop = y;
-      scroller.dispatchEvent(new Event("scroll", {bubbles: true}));
-    }
-  }
-  const seen = new Set();
-  const rendered = [];
+  const scroller = resolveFeishuDocScroller(initialRoot, document);
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const collect = () => {
-    for (const block of currentBlocks()) {
-      const key = block.getAttribute("data-record-id")
-        || block.getAttribute("data-block-id")
-        || `${block.getAttribute("data-block-type")}:${clean(block.innerText).slice(0, 80)}:${rendered.length}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const md = renderBlock(block);
-      if (md) rendered.push(md);
-    }
-  };
-  setScroll(0);
-  await sleep(220);
-  collect();
-  let y = 0;
-  let stable = 0;
-  for (let i = 0; i < 80; i++) {
-    const viewport = scrollWindow ? window.innerHeight : scroller.clientHeight;
-    const maxY = Math.max(0, scroller.scrollHeight - viewport);
-    if (y >= maxY && stable >= 2) break;
-    y = Math.min(maxY, y + Math.max(360, Math.floor(viewport * 0.7)));
-    setScroll(y);
-    await sleep(260);
-    const before = rendered.length;
-    collect();
-    stable = rendered.length === before ? stable + 1 : 0;
-    if (y >= maxY) stable += 1;
-  }
-  setScroll(0);
-  const body = rendered.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+  const collected = await collectFeishuDocBlocks({
+    root: initialRoot,
+    scroller,
+    document,
+    sleep,
+    currentBlocks,
+    renderBlock,
+    maxIterations: 180,
+  });
+  const body = collected.rendered.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
   const markdown = "# " + pageTitle + "\n\n" + body + "\n";
-  return {title: pageTitle, markdown, images: [...new Set(images)], blockCount: rendered.length, textLength: body.length, renderer: "native_doc"};
+  const scrollerHint = (() => {
+    try {
+      return (scroller && scroller.tagName || "") + ":" + (scroller.className ? String(scroller.className).split(/\s+/)[0] || "" : "");
+    } catch (_) { return ""; }
+  })();
+  const result = {title: pageTitle, markdown, images: [...new Set(images)], blockCount: collected.blockCount, textLength: body.length, renderer: "native_doc"};
+  result.scrollIterations = collected.scrollIterations;
+  result.finalScrollHeight = collected.finalScrollHeight;
+  if (scrollerHint) result.scroller = scrollerHint;
+  // Only flag incomplete when we exhausted the iteration ceiling WITHOUT
+  // reaching the bottom of the content scroller. A clean bottom stop means the
+  // document was fully collected; hitting the ceiling by itself used to cause
+  // false "内容可能不完整" reports on fully-exported docs.
+  if (collected.hitIterationCeiling && !collected.reachedBottom) result.incomplete = true;
+  return result;
 }
 """
 
@@ -1221,16 +1447,6 @@ def wait_for_doc_ready(
     raise ExportError(f"飞书{kind}没有加载完成：{(node or {}).get('title') or '未命名'}")
 
 
-def materialize_doc_dom(cdp: CDPClient) -> None:
-    cdp.evaluate(
-        "(async () => {"
-        "const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
-        "for (const p of [0, 0.25, 0.5, 0.75, 1, 0]) { window.scrollTo(0, Math.floor(h * p)); await new Promise(r => setTimeout(r, 160)); }"
-        "})()",
-        timeout=10,
-    )
-
-
 def extract_doc_markdown_current(
     cdp: CDPClient,
     node: dict[str, Any],
@@ -1276,7 +1492,7 @@ def extract_doc_markdown_current(
             value = evaluate_markdown_file(True)
     else:
         wait_for_doc_ready(cdp, timeout=35, args=args, node=node)
-        value = cdp.evaluate(f"({FEISHU_CONVERTER_JS})({js_string(node.get('title') or '未命名')})", timeout=60)
+        value = cdp.evaluate(f"({FEISHU_CONVERTER_JS})({js_string(node.get('title') or '未命名')})", timeout=120)
     if not isinstance(value, dict):
         raise ExportError(f"Unexpected Feishu doc response: {node.get('title')}")
     if value.get("renderer") == "markdown_preview_fallback":
@@ -1758,13 +1974,20 @@ def export_wiki(args: argparse.Namespace) -> dict[str, Any]:
                         {
                             "title": doc.get("title") or "",
                             "wiki_token": token,
-                            "error": "飞书原始 Markdown 下载失败，已保留页面预览兜底内容，但内容可能不完整",
+                            "error": "飞书原始 Markdown 下载失败，已保留页面预览兜底内容，但内容可能不完整"
+                            if result.get("renderer") == "markdown_preview_fallback"
+                            else "飞书原生文档滚动采集触达上限，内容可能不完整（已保留已采集内容）",
                             "local_path": str(md_path),
                         }
                     )
                 if checkpoint:
                     if incomplete:
-                        checkpoint.fail_item(item_key, "原始 Markdown 下载失败，页面预览兜底内容可能不完整")
+                        checkpoint.fail_item(
+                            item_key,
+                            "原始 Markdown 下载失败，页面预览兜底内容可能不完整"
+                            if result.get("renderer") == "markdown_preview_fallback"
+                            else "原生文档滚动采集触达上限，内容可能不完整",
+                        )
                     elif img_errors:
                         checkpoint.fail_item(item_key, f"{len(img_errors)} 个图片下载失败")
                     else:
@@ -1784,6 +2007,11 @@ def export_wiki(args: argparse.Namespace) -> dict[str, Any]:
                         "imageSuccessInDoc": count,
                         "imageFailuresInDoc": len(img_errors),
                         "contentIncomplete": incomplete,
+                        "scrollIterations": result.get("scrollIterations"),
+                        "finalScrollHeight": result.get("finalScrollHeight"),
+                        "scroller": result.get("scroller"),
+                        "blockCount": result.get("blockCount"),
+                        "textLength": result.get("textLength"),
                     },
                 )
             except ExportStopped:
