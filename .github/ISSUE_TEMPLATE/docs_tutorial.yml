@@ -1,61 +1,34 @@
 name: 教程 / 文档建议
-description: 补充教程、公告、迁移经验、排障文档或文档修正
+description: 补充教程、排障说明或修正文档
 title: "[Docs] "
 labels: ["documentation", "status:needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        适合提交平台教程、迁移经验、排障说明、公告内容或文档修正。
+        请简单说明希望新增或修改的内容。
 
-        如果教程涉及私人平台内容，请先脱敏。
+        如果想认领这个 Issue，请直接在评论区回复“认领”，不需要在表单中填写认领计划。
+
+        请先脱敏，不要提交私人内容或账号凭证。
   - type: checkboxes
     id: precheck
     attributes:
-      label: 提交前确认
+      label: 提交前确认（可选）
       options:
-        - label: 我已经搜索过已有 Issue 和 PR，没有找到相同文档建议。
-          required: true
-        - label: 我确认文档、截图和样例中不包含私人内容或敏感凭证。
-          required: true
-  - type: dropdown
-    id: docs_type
-    attributes:
-      label: 文档类型
-      options:
-        - 平台使用教程
-        - 导入/导出排障
-        - 迁移经验
-        - Provider 开发说明
-        - 公告内容
-        - README 修正
-        - 其他
-    validations:
-      required: true
-  - type: input
-    id: related_platform
-    attributes:
-      label: 相关平台
-      placeholder: 例如：语雀 / 飞书 / Notion / 无
+        - label: 我已经搜索过已有 Issue 和 PR，暂时没有找到相同建议。
+        - label: 我已经确认内容和截图中没有敏感信息。
   - type: textarea
-    id: content
+    id: description
     attributes:
-      label: 建议内容
-      description: 请说明希望新增或修改什么。
-      placeholder: 例如：建议补充 macOS 首次打开提示“应用已损坏”的处理方法。
+      label: 文档建议
+      description: 请说明哪里需要补充、修改或纠正。
+      placeholder: 例如：建议补充 macOS 首次打开应用时的处理说明。
     validations:
       required: true
   - type: textarea
     id: references
     attributes:
-      label: 参考资料
-      description: 可提供官方文档、公开教程或截图说明。
-  - type: dropdown
-    id: willing
-    attributes:
-      label: 是否愿意提交 PR
-      options:
-        - 愿意提交文档 PR
-        - 愿意协助校对
-        - 暂时只提供建议
-        - 其他
+      label: 参考资料或截图（可选）
+      description: 可以提供公开链接、截图或示例内容。
+

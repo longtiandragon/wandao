@@ -1,25 +1,23 @@
 name: 新平台接入建议 / 共创认领
-description: 任何人都可以建议新平台，也可以认领导入、导出或教程能力
+description: 建议万能导支持新的平台
 title: "[Platform] "
 labels: ["enhancement", "help wanted", "plugin", "status:needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        任何人都可以使用这个模板建议万能导支持新的平台，不需要会开发，也不需要认领。你也可以提供平台资料、协助测试，或认领平台适配。
+        不需要会开发也可以提出新平台建议。
 
-        请先搜索已有 Issue 和 PR，避免重复建议或重复开发。只有选择认领开发时才适用认领规则：认领确认后 2 天内提交 Draft PR 或可验证进展；如果任务较复杂，请在 2 天内说明情况，此后至少每 2 天同步一次进度。
+        如果想认领这个平台，请直接在评论区回复“认领”，不需要填写认领计划或预计完成时间。
+
+        请不要提交 Cookie、Token、账号密码、App Secret、API Key 或私人内容。
   - type: checkboxes
     id: precheck
     attributes:
-      label: 提交前确认
+      label: 提交前确认（可选）
       options:
-        - label: 我已经搜索过已有 Issue 和 PR，没有找到相同平台或相同方向的适配。
-          required: true
-        - label: 我可以只提出新平台建议；如果准备开发，我会先在 Issue 中完成认领。
-          required: true
-        - label: 我不会提交 Cookie、Token、账号密码、App Secret、API Key 或私人知识库内容。
-          required: true
+        - label: 我已经搜索过已有 Issue 和 PR，暂时没有找到相同平台或方向。
+        - label: 我已经确认没有提交敏感信息。
   - type: input
     id: platform
     attributes:
@@ -27,92 +25,16 @@ body:
       placeholder: 例如：飞书 / 语雀 / 某某知识库
     validations:
       required: true
-  - type: input
-    id: platform_url
-    attributes:
-      label: 平台官网或入口示例
-      description: 优先提供公开官网、帮助文档或公开样例链接，不要提供私人内容链接。
-      placeholder: https://example.com
-  - type: checkboxes
-    id: capability
-    attributes:
-      label: 希望支持的能力
-      options:
-        - label: 导出为 Markdown
-        - label: 导入 Markdown
-        - label: 图片处理
-        - label: 附件处理
-        - label: 读取目录 / 保留目录结构
-        - label: 断点续跑 / 失败重试
-        - label: 教程文档
-        - label: 其他
-    validations:
-      required: true
-  - type: dropdown
-    id: contribution_type
-    attributes:
-      label: 参与方式
-      options:
-        - 我只想建议新增这个平台，暂不参与开发
-        - 我可以协助测试
-        - 我可以提供平台资料或脱敏样例
-        - 我想认领开发这个平台
-        - 我先提供平台调研和样例
-        - 其他
-    validations:
-      required: true
-  - type: dropdown
-    id: provider_type
-    attributes:
-      label: 预计接入方式
-      description: 不确定可以选“不确定”。
-      options:
-        - 标准 UI 插件
-        - 复杂流程插件（可包含多个 Provider）
-        - 教程型插件
-        - 旧 Provider v1 兼容维护
-        - 不确定
   - type: textarea
-    id: current_workflow
+    id: description
     attributes:
-      label: 当前平台的导入/导出方式
-      description: 平台本身是否支持导出？支持哪些格式？有没有官方 API？是否必须浏览器登录？
-      placeholder: |
-        例如：
-        - 平台官方支持导出 HTML/PDF，但不支持 Markdown。
-        - 网页端可以看到目录树。
-        - 图片需要单独下载。
+      label: 需求描述
+      description: 请简单说明希望支持什么，以及平台目前的导入或导出方式。
+      placeholder: 例如：希望支持导出为 Markdown，平台网页需要登录后才能查看内容。
     validations:
       required: true
-  - type: textarea
-    id: expected_output
-    attributes:
-      label: 期望效果
-      description: 描述导入/导出后希望得到什么结构。
-      placeholder: |
-        例如：
-        - 保留多层目录结构。
-        - 每篇文档一个 .md。
-        - 图片保存到 assets 目录，并替换为相对路径。
-    validations:
-      required: true
-  - type: textarea
-    id: test_material
-    attributes:
-      label: 可用于测试的材料
-      description: 可以说明是否有脱敏样例、公开页面、测试账号或可截图的目录结构。请不要直接贴敏感数据。
   - type: textarea
     id: references
     attributes:
-      label: 参考资料或开源项目
-      description: 如果参考第三方项目，请写清楚链接和许可证。
-  - type: input
-    id: eta
-    attributes:
-      label: 认领计划（仅认领者填写）
-      description: 认领确认后 2 天内应提交 Draft PR 或可验证进展。任务较复杂时，请说明原因和下一步，并至少每 2 天同步一次进度。
-      placeholder: 例如：2 天内提交 Draft PR / 任务较复杂，先完成登录流程并同步结果
-  - type: textarea
-    id: extra
-    attributes:
-      label: 其他补充
+      label: 官网、公开资料或测试材料（可选）
+      description: 可以提供公开链接、脱敏样例、截图或测试说明。
