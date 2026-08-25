@@ -843,6 +843,7 @@ def order_tree(tree: dict[str, Any]) -> list[dict[str, Any]]:
 FEISHU_CONVERTER_JS = r"""
 async (fallbackTitle) => {
   const images = [];
+  const imageSourcesByNode = new Map();
   const ZERO = /[\u200b\u200c\u200d\ufeff]/g;
   function clean(value) {
     return (value || "")
@@ -855,6 +856,18 @@ async (fallbackTitle) => {
   function escTable(value) {
     return clean(value).replace(/\|/g, "\\|").replace(/\n+/g, "<br>");
   }
+  function trackImage(img) {
+    const src = imageSource(img);
+    if (!src) return "";
+    images.push(src);
+    let observed = imageSourcesByNode.get(img);
+    if (!observed) {
+      observed = new Set();
+      imageSourcesByNode.set(img, observed);
+    }
+    observed.add(src);
+    return src;
+  }
   function inline(node) {
     if (!node) return "";
     if (node.nodeType === 3) return node.nodeValue.replace(ZERO, "");
@@ -862,9 +875,8 @@ async (fallbackTitle) => {
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "\n";
     if (tag === "img") {
-      const src = node.getAttribute("src") || node.getAttribute("data-src") || "";
+      const src = trackImage(node);
       const alt = node.getAttribute("alt") || "image";
-      if (src) images.push(src);
       return src ? `![${alt}](${src})` : "";
     }
     const text = [...node.childNodes].map(inline).join("");
@@ -897,9 +909,8 @@ async (fallbackTitle) => {
   function renderImage(el) {
     const img = el.querySelector("img");
     if (!img) return "";
-    const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
+    const src = trackImage(img);
     const alt = img.getAttribute("alt") || "image";
-    if (src) images.push(src);
     return src ? `![${alt}](${src})` : "";
   }
   function quote(value) {
@@ -956,6 +967,99 @@ async (fallbackTitle) => {
   }
 
   /* feishu-scroll-api:start */
+  function imageSource(img) {
+    if (!img) return "";
+    const candidates = [
+      img.getAttribute("data-src"),
+      img.getAttribute("data-original"),
+      img.getAttribute("data-image-url"),
+      img.getAttribute("data-original-src"),
+      img.getAttribute("data-lazy-src"),
+      img.currentSrc,
+      img.getAttribute("src"),
+    ];
+    return candidates.map(value => String(value || "").trim()).find(Boolean) || "";
+  }
+
+  async function waitForImage(img, timeout = 1800) {
+    if (!img || img.complete || typeof img.addEventListener !== "function") return;
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        try { img.removeEventListener("load", finish); } catch (_) {}
+        try { img.removeEventListener("error", finish); } catch (_) {}
+        resolve();
+      };
+      img.addEventListener("load", finish, { once: true });
+      img.addEventListener("error", finish, { once: true });
+      setTimeout(finish, timeout);
+    });
+  }
+
+  async function resolveImageSource(img, source) {
+    if (!/^blob:/i.test(String(source || ""))) return source;
+    // Feishu may display the Blob URL successfully while blocking fetch(blob:)
+    // from the page's security policy. Prefer the already-loaded image itself.
+    try {
+      const width = img && (img.naturalWidth || img.width || 0);
+      const height = img && (img.naturalHeight || img.height || 0);
+      if (img && img.complete && width > 0 && height > 0 && document && document.createElement) {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (context) {
+          context.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL("image/png");
+          if (dataUrl && dataUrl !== "data:,") return dataUrl;
+        }
+      }
+    } catch (_) {}
+    if (typeof fetch !== "function" || typeof FileReader !== "function") return source;
+    try {
+      const response = await fetch(source);
+      if (!response.ok) return source;
+      const blob = await response.blob();
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || source));
+        reader.onerror = () => resolve(source);
+        reader.readAsDataURL(blob);
+      });
+    } catch (_) {
+      return source;
+    }
+  }
+
+  async function settleImageSources(rendered, sourceList = [], sourceNodes = new Map()) {
+    const replacements = new Map();
+    const sources = new Set(sourceList);
+    const settled = await Promise.all([...sourceNodes.entries()].map(async ([img, observed]) => {
+      await waitForImage(img);
+      const current = imageSource(img);
+      if (!current) return null;
+      observed.add(current);
+      return { observed, source: await resolveImageSource(img, current) };
+    }));
+    for (const item of settled) {
+      if (!item) continue;
+      sources.add(item.source);
+      for (const previous of item.observed) {
+        if (previous && previous !== item.source) replacements.set(previous, item.source);
+      }
+    }
+    for (let index = 0; index < rendered.length; index++) {
+      let markdown = rendered[index];
+      for (const [from, to] of replacements) {
+        if (from && to && markdown.includes(from)) markdown = markdown.split(from).join(to);
+      }
+      rendered[index] = markdown;
+    }
+    return [...sources].filter(source => !replacements.has(source));
+  }
+
   function resolveFeishuDocScroller(root, doc) {
     const ownerDocument = doc || document;
     const candidates = [];
@@ -980,10 +1084,12 @@ async (fallbackTitle) => {
         }
       } catch (_) {}
     }
+    const containsContent = (el) => Boolean(
+      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
+    );
     const isScrollbarChrome = (el) => {
       const cls = String(el.className || "").toLowerCase();
-      if (cls.includes("scrollbar-container")) return true;
-      return false;
+      return cls.includes("scrollbar-container") && !containsContent(el);
     };
     const acceptsScroll = (el) => {
       if (isScrollbarChrome(el)) return false;
@@ -1004,9 +1110,6 @@ async (fallbackTitle) => {
         return false;
       }
     };
-    const containsContent = (el) => Boolean(
-      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
-    );
     const active = candidates.filter(acceptsScroll);
     // Prefer a scroller that actually contains document blocks (the deepest,
     // nearest the editor root). Skip scrollbar chrome like .scrollbar-container.
@@ -1023,6 +1126,8 @@ async (fallbackTitle) => {
       sleep,
       currentBlocks: listBlocks,
       renderBlock: renderOne,
+      imageList = [],
+      imageNodes = new Map(),
       maxIterations = 180,
     } = options;
     const ownerDoc = doc || document;
@@ -1042,7 +1147,7 @@ async (fallbackTitle) => {
         if (!md) continue;
         if (seen.has(key)) {
           const index = seen.get(key);
-          if (md.length > rendered[index].length) {
+          if (md !== rendered[index]) {
             rendered[index] = md;
             changed += 1;
           }
@@ -1058,12 +1163,15 @@ async (fallbackTitle) => {
     // real virtual-list scroller nested; the first document after navigate may
     // respond to window scroll while later documents only respond to an inner
     // pane. Re-scanning each iteration avoids "first doc scrolls, rest don't".
+    const containsContent = (el) => Boolean(
+      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
+    );
     const findScrollables = () => {
       const out = [];
       const push = (el) => {
         if (!el || out.includes(el)) return;
         const cls = String(el.className || "").toLowerCase();
-        if (cls.includes("scrollbar-container")) return;
+        if (cls.includes("scrollbar-container") && !containsContent(el)) return;
         let style;
         try { style = getComputedStyle(el); } catch (_) { return; }
         if (!/(auto|scroll)/.test(style.overflowY || "")) return;
@@ -1087,10 +1195,8 @@ async (fallbackTitle) => {
       } catch (_) {}
       return out;
     };
-    const containsContent = (el) => Boolean(
-      el && el.querySelector && (el.querySelector("[data-block-type]") || el.querySelector(".ace-line"))
-    );
     const stepScrollables = (scrollables) => {
+      let moved = false;
       for (const el of scrollables) {
         try {
           const viewport = el.clientHeight || (win && win.innerHeight) || 600;
@@ -1103,16 +1209,21 @@ async (fallbackTitle) => {
           // after height growth.
           const target = before >= maxY - 2 ? maxY : Math.min(maxY, before + step);
           el.scrollTop = target;
+          if (Math.abs((el.scrollTop || 0) - before) > 1) moved = true;
           try { el.dispatchEvent(new Event("scroll", {bubbles: true})); } catch (_) {}
         } catch (_) {}
       }
-      // Always also scroll the last mounted block into view — this scrolls every
-      // real ancestor the browser knows about, even ones we failed to list.
-      try {
-        const blocks = listBlocks();
-        const last = blocks[blocks.length - 1];
-        if (last && last.scrollIntoView) last.scrollIntoView({ block: "end", inline: "nearest" });
-      } catch (_) {}
+      // Use scrollIntoView only as a fallback. On native Feishu docs it can
+      // undo the explicit scrollTop step and keep the real document scroller
+      // pinned near the first mounted block.
+      const hasContentScroller = scrollables.some(containsContent);
+      if (!moved && !hasContentScroller) {
+        try {
+          const blocks = listBlocks();
+          const last = blocks[blocks.length - 1];
+          if (last && last.scrollIntoView) last.scrollIntoView({ block: "end", inline: "nearest" });
+        } catch (_) {}
+      }
     };
     // Only require content-bearing scrollers to be at bottom. Outer window /
     // shell panes often stay "not at bottom" forever and caused a full 180-iter
@@ -1124,7 +1235,8 @@ async (fallbackTitle) => {
       return pool.every((el) => {
         try {
           const maxY = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));
-          return maxY <= 0 || (el.scrollTop || 0) >= maxY - 2;
+          const tolerance = Math.max(8, Math.min(160, Math.floor((el.clientHeight || 0) * 0.1)));
+          return maxY <= 0 || (el.scrollTop || 0) >= maxY - tolerance;
         } catch (_) { return true; }
       });
     };
@@ -1169,9 +1281,11 @@ async (fallbackTitle) => {
       if (atBottom) reachedBottom = true;
       if (stable >= 3 && atBottom) break;
     }
+    const settledImages = await settleImageSources(rendered, imageList, imageNodes);
     resetScroll(scrollables);
     return {
       rendered,
+      images: settledImages,
       blockCount: rendered.length,
       scrollIterations,
       finalScrollHeight,
@@ -1198,6 +1312,8 @@ async (fallbackTitle) => {
     sleep,
     currentBlocks,
     renderBlock,
+    imageList: images,
+    imageNodes: imageSourcesByNode,
     maxIterations: 180,
   });
   const body = collected.rendered.filter(Boolean).join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -1207,7 +1323,7 @@ async (fallbackTitle) => {
       return (scroller && scroller.tagName || "") + ":" + (scroller.className ? String(scroller.className).split(/\s+/)[0] || "" : "");
     } catch (_) { return ""; }
   })();
-  const result = {title: pageTitle, markdown, images: [...new Set(images)], blockCount: collected.blockCount, textLength: body.length, renderer: "native_doc"};
+  const result = {title: pageTitle, markdown, images: collected.images, blockCount: collected.blockCount, textLength: body.length, renderer: "native_doc"};
   result.scrollIterations = collected.scrollIterations;
   result.finalScrollHeight = collected.finalScrollHeight;
   if (scrollerHint) result.scroller = scrollerHint;
@@ -1516,6 +1632,9 @@ def fetch_doc_markdown(
 
 
 def guess_extension(url: str, content_type: str | None) -> str:
+    if url.lower().startswith("data:"):
+        metadata = url[5:].split(",", 1)[0]
+        content_type = metadata.split(";", 1)[0] or content_type or ""
     path = urllib.parse.urlparse(url).path.lower()
     match = re.search(r"\.([a-z0-9]{2,5})$", path)
     if match:
@@ -1535,6 +1654,23 @@ def guess_extension(url: str, content_type: str | None) -> str:
     return "png"
 
 
+def decode_data_url(url: str) -> tuple[bytes, str]:
+    if not url.lower().startswith("data:") or "," not in url:
+        raise ExportError("Invalid image data URL")
+    metadata, payload = url[5:].split(",", 1)
+    content_type = metadata.split(";", 1)[0] or "application/octet-stream"
+    if any(part.lower() == "base64" for part in metadata.split(";")):
+        try:
+            data = base64.b64decode(payload, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise ExportError("Invalid base64 image data URL") from exc
+    else:
+        data = urllib.parse.unquote_to_bytes(payload)
+    if not data:
+        raise ExportError("Empty image data URL")
+    return data, content_type
+
+
 def cookie_header_for_url(cookies: list[dict[str, Any]], url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""
@@ -1551,20 +1687,49 @@ def cookie_header_for_url(cookies: list[dict[str, Any]], url: str) -> str:
     return "; ".join(pairs)
 
 
+BLOB_IMAGE_DATA_URL_JS = r"""
+async (url) => {
+  if (typeof fetch !== "function" || typeof FileReader !== "function") {
+    throw new Error("浏览器不支持读取 Blob 图片");
+  }
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Blob 图片读取失败：HTTP ${response.status}`);
+  const blob = await response.blob();
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Blob 图片读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+"""
+
+
 def download_image(url: str, dest_dir: Path, cookies: list[dict[str, Any]], timeout: int) -> Path:
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.feishu.cn/"}
-    cookie_header = cookie_header_for_url(cookies, url)
-    if cookie_header:
-        headers["Cookie"] = cookie_header
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = response.read()
-        ext = guess_extension(url, response.headers.get("Content-Type"))
+    if url.lower().startswith("data:"):
+        data, content_type = decode_data_url(url)
+        ext = guess_extension(url, content_type)
+    else:
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.feishu.cn/"}
+        cookie_header = cookie_header_for_url(cookies, url)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read()
+            ext = guess_extension(url, response.headers.get("Content-Type"))
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / (hashlib.sha1(url.encode("utf-8")).hexdigest()[:12] + "." + ext)
     if not target.exists():
         target.write_bytes(data)
     return target
+
+
+def download_blob_image(cdp: CDPClient, url: str, dest_dir: Path, timeout: int) -> Path:
+    data_url = cdp.evaluate(f"({BLOB_IMAGE_DATA_URL_JS})({js_string(url)})", timeout=timeout)
+    if not isinstance(data_url, str) or not data_url.lower().startswith("data:"):
+        raise ExportError("浏览器 Blob 图片未返回有效图片数据")
+    return download_image(data_url, dest_dir, [], timeout)
 
 
 def localize_images(
@@ -1582,10 +1747,13 @@ def localize_images(
     failures: list[dict[str, str]] = []
     for url in sorted(set(images)):
         check_stopped(args)
-        if not url.startswith(("http://", "https://")):
-            continue
         try:
-            target = download_image(url, md_path.parent / "assets", cookies, timeout)
+            if url.lower().startswith("blob:"):
+                target = download_blob_image(cdp, url, md_path.parent / "assets", timeout)
+            elif url.lower().startswith(("http://", "https://", "data:")):
+                target = download_image(url, md_path.parent / "assets", cookies, timeout)
+            else:
+                continue
             markdown = markdown.replace(url, os.path.relpath(target, md_path.parent).replace("\\", "/"))
             success += 1
         except Exception as exc:
