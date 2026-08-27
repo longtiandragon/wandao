@@ -50,6 +50,11 @@ DEFAULT_PROFILE = ".wiz-chrome-profile"
 DEFAULT_AUTH_FILE = ".wiz_auth.json"
 WIZ_APP_URL = "https://www.wiz.cn/xapp"
 FORBIDDEN_FILENAME_CHARS = r'<>:"/\|?*'
+MAX_BROWSER_IMAGE_BYTES = 25 * 1024 * 1024
+WIZ_UPGRADE_PAGE_MARKERS = (
+    ("当前客户端版本较低", "无法编辑协作笔记"),
+    ("the current client version is too low", "edit collaborative notes"),
+)
 
 
 @dataclass
@@ -105,6 +110,50 @@ def js_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def redact_wiz_url(value: str) -> str:
+    """Keep only the origin/path in diagnostics; discard query credentials."""
+    parsed = urllib.parse.urlsplit(str(value or ""))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def note_download_diagnostic(data: dict[str, Any] | None) -> dict[str, Any]:
+    payload = data if isinstance(data, dict) else {}
+    metadata = payload.get("__wandaoMeta") if isinstance(payload.get("__wandaoMeta"), dict) else {}
+    html_text = str(payload.get("html") or "")
+    return {
+        "httpStatus": int(metadata.get("httpStatus") or 0),
+        "returnCode": int(payload.get("returnCode") or payload.get("return_code") or 200),
+        "bodyLength": len(html_text) or int(metadata.get("bodyLength") or 0),
+        "jsonBody": bool(metadata.get("jsonBody")),
+        "contentType": str(metadata.get("contentType") or "")[:100],
+        "hasHtml": bool(html_text),
+        "upgradePage": is_wiz_upgrade_page(html_text),
+        "topLevelKeys": sorted(
+            str(key)[:80]
+            for key in payload
+            if key != "__wandaoMeta"
+        )[:30],
+    }
+
+
+def emit_wiz_diagnostic(
+    args: argparse.Namespace | None,
+    doc: WizDoc,
+    phase: str,
+    *,
+    level: str = "info",
+    **details: Any,
+) -> None:
+    emit(
+        args,
+        f"为知导出诊断：{doc.title}：{phase}",
+        event="wiz.diagnostic",
+        level=level,
+        doc={"id": doc.doc_guid, "title": doc.title},
+        diagnostic={"phase": phase, **details},
+    )
+
+
 def page_for_wiz(port: int) -> dict[str, Any] | None:
     pages = http_json(f"http://127.0.0.1:{port}/json/list", timeout=5)
     for page in pages:
@@ -142,7 +191,8 @@ def connect_wiz_browser(args: argparse.Namespace, initial_url: str = WIZ_APP_URL
 
 WIZ_HELPER_JS = r"""
 (() => {
-  if (window.__wandaoWiz && window.__wandaoWiz.version === 1) return true;
+  if (window.__wandaoWiz && window.__wandaoWiz.version === 7) return true;
+  window.__wandaoWizDocumentIndex = null;
 
   const reqToPromise = (req) => new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
@@ -252,7 +302,7 @@ WIZ_HELPER_JS = r"""
     return { "x-wiz-token": account.token };
   };
 
-  const noteDownload = async (kbGuid, docGuid) => {
+const noteDownload = async (kbGuid, docGuid) => {
     const account = await currentAccount();
     if (!account || !account.token) throw new Error("为知登录 token 不可用，请重新登录。");
     const kbServer = account.kbServer || "";
@@ -261,10 +311,19 @@ WIZ_HELPER_JS = r"""
     const text = await response.text();
     let data = null;
     try { data = JSON.parse(text); } catch (_error) {}
+    const metadata = {
+      httpStatus: response.status,
+      bodyLength: text.length,
+      jsonBody: Boolean(data),
+      contentType: response.headers.get("content-type") || "",
+    };
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
     }
-    return data || { html: text };
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return Object.assign({}, data, { __wandaoMeta: metadata });
+    }
+    return { html: text, __wandaoMeta: metadata };
   };
 
   const otDoc = async (kbGuid, docGuid) => {
@@ -321,13 +380,106 @@ WIZ_HELPER_JS = r"""
     };
   };
 
+  const normalizeTitle = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+  const editorRoot = () => (
+    document.querySelector(".editor-container.root-container.editor-with-title")
+    || document.querySelector(".editor-container")
+  );
+
+  const editorTitle = (root) => {
+    if (!root) return "";
+    const title = root.querySelector("h1.title-block, .title-block");
+    return normalizeTitle(title ? (title.innerText || title.textContent) : "");
+  };
+
+  const findDocumentItem = (docGuid) => {
+    const wanted = `note-list-item-${docGuid}`;
+    return Array.from(document.querySelectorAll("[data-drag-id]")).find(
+      (candidate) => candidate.getAttribute("data-drag-id") === wanted
+    );
+  };
+
+  const listScrollLayer = () => Array.from(document.querySelectorAll(".react-custom-scrollbars-layer")).find(
+    (layer) => layer.querySelector(".virtual-list-container")
+  );
+
+  const domDocumentIndex = async () => {
+    if (window.__wandaoWizDocumentIndex) return window.__wandaoWizDocumentIndex;
+    const layer = listScrollLayer();
+    if (!layer) return {};
+    const result = {};
+    const originalTop = layer.scrollTop;
+    const step = Math.max(250, Math.floor(layer.clientHeight * 0.8));
+    for (let top = 0; top <= layer.scrollHeight; top += step) {
+      layer.scrollTop = top;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const layerTop = layer.getBoundingClientRect().top;
+      for (const item of document.querySelectorAll('[data-drag-id^="note-list-item-"]')) {
+        const id = String(item.getAttribute("data-drag-id") || "").replace(/^note-list-item-/, "");
+        const itemTop = item.getBoundingClientRect().top;
+        // Use viewport geometry because virtual-list offsetTop is unstable
+        // while React recycles its rendered rows during scrolling.
+        if (id && Number.isFinite(itemTop)) result[id] = layer.scrollTop + itemTop - layerTop;
+      }
+    }
+    layer.scrollTop = originalTop;
+    window.__wandaoWizDocumentIndex = result;
+    return result;
+  };
+
+  const clickDocument = async (docGuid, expectedTitle) => {
+    let item = findDocumentItem(docGuid);
+    if (!item) {
+      const layer = listScrollLayer();
+      const index = await domDocumentIndex();
+      const documentTop = Number(index[docGuid]);
+      if (layer && Number.isFinite(documentTop)) {
+        layer.scrollTop = Math.max(0, Math.min(layer.scrollHeight, documentTop - Math.floor(layer.clientHeight * 0.25)));
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          item = findDocumentItem(docGuid);
+          if (item) break;
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+      }
+    }
+    if (!item) return false;
+    item.click();
+    return true;
+  };
+
+  const domEditorDocument = async (docGuid, expectedTitle, timeoutMs = 15000) => {
+    const wantedTitle = normalizeTitle(expectedTitle);
+    let root = editorRoot();
+    if (!root || editorTitle(root) !== wantedTitle || !root.querySelector('[data-node-type="block"]')) {
+      await clickDocument(docGuid, expectedTitle);
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      root = editorRoot();
+      const title = editorTitle(root);
+      if (root && title === wantedTitle && root.querySelector('[data-node-type="block"]')) {
+        return {
+          title,
+          html: root.outerHTML,
+          blockCount: root.querySelectorAll('[data-node-type="block"]').length,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  };
+
   window.__wandaoWiz = {
-    version: 1,
+    version: 7,
     snapshot,
     noteDownload,
     otDoc,
     resourceCache,
     fetchBase64,
+    domDocumentIndex,
+    domEditorDocument,
   };
   return true;
 })()
@@ -567,6 +719,9 @@ class ResourceSaver:
         self.image_count = 0
         self.failures: list[dict[str, str]] = []
 
+    def diagnostic(self, phase: str, *, level: str = "info", **details: Any) -> None:
+        emit_wiz_diagnostic(self.args, self.doc, phase, level=level, **details)
+
     def build_collab_url(self, src: str) -> str:
         if re.match(r"^https?://", src, re.I):
             return src
@@ -595,6 +750,251 @@ class ResourceSaver:
         expression = f"window.__wandaoWiz.fetchBase64({js_string(url)})"
         return self.cdp.evaluate(expression, timeout=120)
 
+    def fetch_image_via_network_resource(self, url: str) -> dict[str, Any]:
+        """Read an image with Chrome's network stack when page fetch is CORS-blocked."""
+        if not self.cdp:
+            raise ExportError("缺少浏览器连接，无法读取图片资源。")
+        safe_url = redact_wiz_url(url)
+        self.diagnostic("image.network_resource.started", url=safe_url)
+        frame_tree = self.cdp.send("Page.getFrameTree", timeout=30).get("result") or {}
+        frame_id = str((((frame_tree.get("frameTree") or {}).get("frame") or {}).get("id") or ""))
+        if not frame_id:
+            raise ExportError("浏览器页面缺少主框架，无法读取图片资源。")
+        loaded = self.cdp.send(
+            "Network.loadNetworkResource",
+            {
+                "frameId": frame_id,
+                "url": url,
+                "options": {"disableCache": False, "includeCredentials": False},
+            },
+            timeout=120,
+        )
+        resource = ((loaded.get("result") or {}).get("resource") or {})
+        if not resource.get("success"):
+            raise ExportError("浏览器网络资源读取失败。")
+        status = int(resource.get("httpStatusCode") or resource.get("statusCode") or 0)
+        if status and (status < 200 or status >= 300):
+            raise ExportError(f"浏览器图片请求返回 HTTP {status}。")
+        headers = resource.get("headers") or {}
+        content_type = next(
+            (str(value) for key, value in headers.items() if str(key).lower() == "content-type"),
+            "",
+        )
+        if not content_type.split(";", 1)[0].strip().lower().startswith("image/"):
+            raise ExportError("浏览器网络资源不是图片。")
+        stream = str(resource.get("stream") or "")
+        if not stream:
+            raise ExportError("浏览器网络资源没有可读取的数据流。")
+        raw = bytearray()
+        try:
+            while True:
+                chunk = self.cdp.send("IO.read", {"handle": stream, "size": 65536}, timeout=120).get("result") or {}
+                data = chunk.get("data")
+                if not isinstance(data, str):
+                    raise ExportError("浏览器网络资源返回了无效数据。")
+                raw.extend(base64.b64decode(data) if chunk.get("base64Encoded") else data.encode("utf-8"))
+                if len(raw) > MAX_BROWSER_IMAGE_BYTES:
+                    raise ExportError(f"图片超过大小限制（{MAX_BROWSER_IMAGE_BYTES // 1024 // 1024} MB）。")
+                if chunk.get("eof"):
+                    break
+                if not data:
+                    raise ExportError("浏览器网络资源读取中断。")
+        finally:
+            try:
+                self.cdp.send("IO.close", {"handle": stream}, timeout=30)
+            except Exception:  # noqa: BLE001 - preserve the original resource failure.
+                pass
+        if not raw:
+            raise ExportError("浏览器网络图片响应为空。")
+        self.diagnostic("image.network_resource.loaded", url=safe_url, bytes=len(raw), contentType=content_type[:100])
+        return {"base64": base64.b64encode(raw).decode("ascii"), "contentType": content_type}
+
+    def fetch_image_via_browser(self, url: str) -> dict[str, Any]:
+        """Read an image response through CDP when page fetch is blocked by CORS."""
+        if not self.cdp:
+            raise ExportError("缺少浏览器连接，无法读取图片响应。")
+        safe_url = redact_wiz_url(url)
+        self.diagnostic("image.browser_fallback.started", url=safe_url)
+        self.cdp.send("Network.enable")
+        self.cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+        try:
+            expression = (
+                "(() => {"
+                "const image = new Image();"
+                "window.__wandaoWizImageFallback = image;"
+                f"image.src = {js_string(url)};"
+                "return true;"
+                "})()"
+            )
+            self.cdp.evaluate(expression, timeout=120)
+
+            def is_matching_request(event: dict[str, Any]) -> bool:
+                params = event.get("params") or {}
+                request = params.get("request") or {}
+                return str(request.get("url") or "") == url
+
+            request_event = self.cdp.wait_for_event(
+                "Network.requestWillBeSent",
+                timeout=30,
+                predicate=is_matching_request,
+            )
+            request_params = request_event.get("params") or {}
+            request_id = str(request_params.get("requestId") or "")
+            if not request_id:
+                raise ExportError("浏览器图片请求缺少请求标识。")
+            self.diagnostic("image.browser_fallback.request_seen", url=safe_url)
+
+            def is_matching_request_id(event: dict[str, Any]) -> bool:
+                params = event.get("params") or {}
+                return str(params.get("requestId") or "") == request_id
+
+            def wait_matching_event(method: str, timeout: float) -> dict[str, Any] | None:
+                try:
+                    return self.cdp.wait_for_event(method, timeout=timeout, predicate=is_matching_request_id)
+                except ExportError as exc:
+                    if str(exc).startswith("Timed out waiting for CDP event:"):
+                        return None
+                    raise
+
+            response: dict[str, Any] | None = None
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                remaining = max(0.1, min(0.5, deadline - time.monotonic()))
+                if response is None:
+                    event = wait_matching_event("Network.responseReceived", remaining)
+                    if event:
+                        params = event.get("params") or {}
+                        candidate = params.get("response") or {}
+                        status = int(candidate.get("status") or 0)
+                        response_url = redact_wiz_url(str(candidate.get("url") or url))
+                        self.diagnostic(
+                            "image.browser_fallback.response_seen",
+                            url=response_url,
+                            status=status,
+                            resourceType=str(params.get("type") or ""),
+                        )
+                        if 300 <= status < 400:
+                            self.diagnostic("image.browser_fallback.redirect_seen", url=response_url, status=status)
+                            continue
+                        if status < 200 or status >= 300:
+                            raise ExportError(f"浏览器图片请求返回 HTTP {status}。")
+                        headers = candidate.get("headers") or {}
+                        content_type = next(
+                            (str(value) for key, value in headers.items() if str(key).lower() == "content-type"),
+                            "application/octet-stream",
+                        )
+                        media_type = content_type.split(";", 1)[0].strip().lower()
+                        if media_type and media_type != "application/octet-stream" and not media_type.startswith("image/"):
+                            self.diagnostic(
+                                "image.browser_fallback.non_image_response",
+                                level="warn",
+                                url=response_url,
+                                contentType=media_type[:100],
+                            )
+                            raise ExportError("浏览器图片响应不是图片资源。")
+                        response = candidate
+
+                failed = wait_matching_event("Network.loadingFailed", remaining)
+                if failed:
+                    failure = failed.get("params") or {}
+                    self.diagnostic(
+                        "image.browser_fallback.loading_failed",
+                        level="error",
+                        url=safe_url,
+                        blockedReason=str(failure.get("blockedReason") or "")[:100],
+                        canceled=bool(failure.get("canceled")),
+                    )
+                    raise ExportError("浏览器图片网络加载失败。")
+
+                finished = wait_matching_event("Network.loadingFinished", remaining)
+                if not finished:
+                    continue
+                if response is None:
+                    self.diagnostic("image.browser_fallback.finished_without_response", level="warn", url=safe_url)
+                    raise ExportError("浏览器图片加载完成，但没有可读取的响应。")
+                break
+
+            if response is None:
+                raise ExportError("浏览器图片请求等待超时。")
+
+            body_response = self.cdp.send(
+                "Network.getResponseBody",
+                {"requestId": request_id},
+                timeout=120,
+            )
+            result = body_response.get("result") or {}
+            body = result.get("body")
+            if not isinstance(body, str) or not body:
+                raise ExportError("浏览器图片响应为空。")
+            if result.get("base64Encoded"):
+                encoded = body
+                raw_size = (len(body) * 3) // 4
+            else:
+                raw = body.encode("utf-8")
+                encoded = base64.b64encode(raw).decode("ascii")
+                raw_size = len(raw)
+            if raw_size > MAX_BROWSER_IMAGE_BYTES:
+                raise ExportError(f"图片超过大小限制（{MAX_BROWSER_IMAGE_BYTES // 1024 // 1024} MB）。")
+            self.diagnostic(
+                "image.browser_fallback.body_read",
+                url=safe_url,
+                bytes=raw_size,
+                contentType=content_type[:100],
+            )
+            return {
+                "base64": encoded,
+                "contentType": content_type,
+                "finalUrl": str(response.get("url") or url),
+            }
+        finally:
+            try:
+                self.cdp.evaluate("window.__wandaoWizImageFallback = null", timeout=3)
+            except Exception:  # noqa: BLE001 - cleanup must not replace the image error.
+                pass
+            self.cdp.send("Network.setCacheDisabled", {"cacheDisabled": False})
+
+    def fetch_image_base64(self, url: str) -> dict[str, Any]:
+        safe_url = redact_wiz_url(url)
+        try:
+            payload = self.fetch_base64(url)
+            self.diagnostic("image.fetch.success", transport="fetch", url=safe_url)
+            return payload
+        except Exception as first_error:  # noqa: BLE001 - try a browser-native image load.
+            self.diagnostic(
+                "image.fetch.failed",
+                level="warn",
+                transport="fetch",
+                url=safe_url,
+                errorType=type(first_error).__name__,
+            )
+            try:
+                payload = self.fetch_image_via_network_resource(url)
+                self.diagnostic("image.fetch.success", transport="browser-network", url=safe_url)
+                return payload
+            except Exception as network_error:  # noqa: BLE001 - keep the existing image-request fallback.
+                self.diagnostic(
+                    "image.fetch.failed",
+                    level="warn",
+                    transport="browser-network",
+                    url=safe_url,
+                    errorType=type(network_error).__name__,
+                )
+                try:
+                    payload = self.fetch_image_via_browser(url)
+                    self.diagnostic("image.fetch.success", transport="browser-cdp", url=safe_url)
+                    return payload
+                except Exception as fallback_error:  # noqa: BLE001 - preserve all fallback causes.
+                    self.diagnostic(
+                        "image.fetch.failed",
+                        level="error",
+                        transport="browser-cdp",
+                        url=safe_url,
+                        errorType=type(fallback_error).__name__,
+                    )
+                    raise ExportError(
+                        f"图片下载失败：网页 fetch={first_error}；浏览器网络={network_error}；浏览器图片加载={fallback_error}"
+                    ) from fallback_error
+
     def fetch_cache_base64(self, name: str) -> dict[str, Any] | None:
         expression = f"window.__wandaoWiz.resourceCache({js_string(name)})"
         return self.cdp.evaluate(expression, timeout=60)
@@ -622,13 +1022,23 @@ class ResourceSaver:
         if key in self.saved:
             return self.saved[key]
         url = self.build_collab_url(src)
+        self.diagnostic("image.collab.started", url=redact_wiz_url(url))
         try:
-            payload = self.fetch_base64(url)
-        except Exception:
+            payload = self.fetch_image_base64(url)
+            self.diagnostic("image.collab.fetch_success", url=redact_wiz_url(url))
+        except Exception as exc:
+            self.diagnostic(
+                "image.collab.fetch_failed",
+                level="warn",
+                url=redact_wiz_url(url),
+                errorType=type(exc).__name__,
+            )
             payload = self.fetch_cache_base64(src)
         if not payload:
+            self.diagnostic("image.collab.cache_miss", level="error", url=redact_wiz_url(url))
             self.failures.append({"url": url, "error": "图片下载失败"})
             return ""
+        self.diagnostic("image.collab.cache_or_fetch_success", url=redact_wiz_url(url))
         return self.save_data(key, file_name or src, payload, alt)
 
     def save_normal_image(self, src: str, alt: str = "") -> str:
@@ -643,7 +1053,7 @@ class ResourceSaver:
             return self.save_data(key, alt or f"image{self.image_count + 1:03d}", payload, alt)
         url = self.build_normal_url(src)
         try:
-            payload = self.fetch_base64(url)
+            payload = self.fetch_image_base64(url)
             return self.save_data(key, Path(PurePosixPath(urllib.parse.urlparse(url).path).name).name or src, payload, alt)
         except Exception as exc:  # noqa: BLE001 - keep exporting the note body.
             self.failures.append({"url": url, "error": str(exc)})
@@ -873,6 +1283,123 @@ def fetch_note_download(cdp: CDPClient, doc: WizDoc) -> dict[str, Any] | None:
     return data
 
 
+class _DomEditorParser(HTMLParser):
+    """Collect only safe metadata while preserving the original editor HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title_parts: list[str] = []
+        self.title_depth = 0
+        self.block_count = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set(str(attributes.get("class") or "").split())
+        if tag.lower() == "h1" and "title-block" in classes:
+            self.title_depth += 1
+        if attributes.get("data-node-type") == "block":
+            self.block_count += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "h1" and self.title_depth:
+            self.title_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.title_depth:
+            self.title_parts.append(data)
+
+
+def _normalize_dom_title(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
+
+
+def extract_dom_editor_html(editor_html: str, expected_title: str) -> dict[str, Any] | None:
+    """Validate a Wiz editor snapshot before allowing it into the Markdown parser."""
+    if not editor_html or not expected_title:
+        return None
+    parser = _DomEditorParser()
+    try:
+        parser.feed(editor_html)
+        parser.close()
+    except Exception:  # noqa: BLE001 - malformed DOM is not exportable.
+        return None
+    title = _normalize_dom_title("".join(parser.title_parts))
+    if title != _normalize_dom_title(expected_title) or parser.block_count <= 0:
+        return None
+    return {"title": title, "html": editor_html, "blockCount": parser.block_count}
+
+
+def fetch_dom_editor_document(cdp: CDPClient | None, doc: WizDoc, args: argparse.Namespace) -> dict[str, Any] | None:
+    if not cdp:
+        return None
+    install_helpers(cdp)
+    expression = (
+        f"window.__wandaoWiz.domEditorDocument({js_string(doc.doc_guid)}, "
+        f"{js_string(doc.title)}, 15000)"
+    )
+    data = cdp.evaluate(expression, timeout=30)
+    html_text = str(data.get("html") or "") if isinstance(data, dict) else ""
+    validated = extract_dom_editor_html(html_text, doc.title)
+    if not validated:
+        emit_wiz_diagnostic(args, doc, "content.dom.missing", level="warn")
+        return None
+    emit_wiz_diagnostic(
+        args,
+        doc,
+        "content.dom.loaded",
+        blockCount=int(validated.get("blockCount") or 0),
+    )
+    return validated
+
+
+def is_wiz_upgrade_page(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip().lower()
+    return any(all(marker in normalized for marker in markers) for markers in WIZ_UPGRADE_PAGE_MARKERS)
+
+
+def is_explicitly_empty_note_html(value: str) -> bool:
+    """Recognize Wiz's successful empty-note markup without accepting unknown content."""
+    without_comments = re.sub(r"<!--.*?-->", "", str(value or ""), flags=re.S)
+    text = re.sub(r"<[^>]*>", "", without_comments)
+    visible = re.sub(r"[\s\u00a0\u200b\ufeff]+", "", html.unescape(text))
+    return not visible
+
+
+def fetch_ot_for_export(
+    cdp: CDPClient,
+    doc: WizDoc,
+    args: argparse.Namespace,
+    attempt: str,
+) -> dict[str, Any] | None:
+    try:
+        data = fetch_ot_document(cdp, doc)
+    except Exception as exc:  # noqa: BLE001 - retain the original export behavior after logging.
+        emit_wiz_diagnostic(
+            args,
+            doc,
+            "content.ot.failed",
+            level="error",
+            attempt=attempt,
+            errorType=type(exc).__name__,
+        )
+        raise
+    if not data:
+        emit_wiz_diagnostic(args, doc, "content.ot.missing", attempt=attempt)
+        return None
+    blocks = data.get("blocks") if isinstance(data, dict) else None
+    emit_wiz_diagnostic(
+        args,
+        doc,
+        "content.ot.loaded",
+        attempt=attempt,
+        version=int(data.get("ver") or 0),
+        syncVersion=int(data.get("syncVer") or 0),
+        blockCount=len(blocks) if isinstance(blocks, list) else 0,
+        hasBlocks=isinstance(blocks, list),
+    )
+    return data
+
+
 def export_doc(cdp: CDPClient, snapshot: dict[str, Any], doc: WizDoc, md_path: Path, args: argparse.Namespace) -> tuple[int, list[dict[str, str]]]:
     kb_server = get_kb_server(snapshot, doc)
     if not kb_server:
@@ -881,24 +1408,56 @@ def export_doc(cdp: CDPClient, snapshot: dict[str, Any], doc: WizDoc, md_path: P
     markdown = ""
 
     if doc.note_type == "collaboration":
-        ot_data = fetch_ot_document(cdp, doc)
+        ot_data = fetch_ot_for_export(cdp, doc, args, "before-download")
         if ot_data and isinstance(ot_data.get("blocks"), list):
             markdown = blocks_to_markdown(doc, ot_data.get("blocks") or [], saver)
 
+    upgrade_page = False
     if not markdown:
-        downloaded = fetch_note_download(cdp, doc)
+        try:
+            downloaded = fetch_note_download(cdp, doc)
+        except Exception as exc:  # noqa: BLE001 - retain the original export behavior after logging.
+            emit_wiz_diagnostic(
+                args,
+                doc,
+                "content.note_download.failed",
+                level="error",
+                errorType=type(exc).__name__,
+            )
+            raise
+        if downloaded is None:
+            emit_wiz_diagnostic(args, doc, "content.note_download.empty", level="warn")
+        else:
+            emit_wiz_diagnostic(args, doc, "content.note_download.loaded", **note_download_diagnostic(downloaded))
         html_text = str((downloaded or {}).get("html") or "")
-        if html_text:
+        if is_wiz_upgrade_page(html_text):
+            upgrade_page = True
+        elif html_text:
             parser = WizHtmlToMarkdown(saver.save_normal_image)
             parser.feed(html_text)
             markdown = parser.result()
+            if not markdown and is_explicitly_empty_note_html(html_text):
+                markdown = f"# {doc.title}\n"
+        elif downloaded is not None:
+            markdown = f"# {doc.title}\n"
+
+    # The current Wiz web editor may render collaboration notes in the DOM
+    # even when /ks/note/download returns the client-upgrade page.
+    if not markdown:
+        dom_data = fetch_dom_editor_document(cdp, doc, args)
+        if dom_data:
+            parser = WizHtmlToMarkdown(saver.save_normal_image)
+            parser.feed(str(dom_data.get("html") or ""))
+            markdown = parser.result()
 
     if not markdown:
-        ot_data = fetch_ot_document(cdp, doc)
+        ot_data = fetch_ot_for_export(cdp, doc, args, "after-download")
         if ot_data and isinstance(ot_data.get("blocks"), list):
             markdown = blocks_to_markdown(doc, ot_data.get("blocks") or [], saver)
 
     if not markdown:
+        if upgrade_page:
+            raise ExportError("为知协作笔记返回了客户端升级提示，未读取到正文；请升级为知网页客户端后重试。")
         raise ExportError("未能读取正文，可能是笔记尚未同步或登录态已失效。")
 
     if not re.match(r"^#\s+", markdown.lstrip()):
@@ -943,6 +1502,21 @@ def select_wiz_documents(docs: list[WizDoc], selected_doc_ids: set[str] | None =
             "请重新读取目录后再试。未匹配 ID：" + preview
         )
     return selected
+
+
+def should_skip_existing_doc(
+    *,
+    checkpoint_status: str | None,
+    incremental: bool,
+    path_exists: bool,
+    retry_failed: bool,
+) -> bool:
+    """Keep incremental exports from hiding items explicitly selected for retry."""
+    return bool(
+        incremental
+        and path_exists
+        and not (retry_failed and checkpoint_status == "failed")
+    )
 
 
 def export_wiz(args: argparse.Namespace) -> dict[str, Any]:
@@ -999,10 +1573,16 @@ def export_wiz(args: argparse.Namespace) -> dict[str, Any]:
             md_path = doc_paths[doc.doc_guid]
             item_key = f"wiz:doc:{doc.doc_guid}"
             try:
-                if checkpoint and getattr(args, "resume", False) and checkpoint.item_status(item_key) == "completed":
+                checkpoint_status = checkpoint.item_status(item_key) if checkpoint else None
+                if checkpoint and getattr(args, "resume", False) and checkpoint_status == "completed":
                     skipped += 1
                     continue
-                if args.incremental and md_path.exists():
+                if should_skip_existing_doc(
+                    checkpoint_status=checkpoint_status,
+                    incremental=args.incremental,
+                    path_exists=md_path.exists(),
+                    retry_failed=bool(getattr(args, "retry_failed", False)),
+                ):
                     if checkpoint:
                         checkpoint.complete_item(item_key, local_path=str(md_path), metadata={"docGuid": doc.doc_guid, "skippedExisting": True})
                     skipped += 1
