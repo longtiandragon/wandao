@@ -73,3 +73,14 @@ test('sponsor content is always rendered below the notice layout with safe rich 
   assert.match(stylesSource, /\.notice-sponsor\s*\{/);
   assert.match(stylesSource, /\.log-entry \.log-external-link\s*\{/);
 });
+
+test('sponsor logs stay out of copied developer error reports', () => {
+  const copyStart = appSource.indexOf('async function copyDeveloperReport');
+  const copyEnd = appSource.indexOf('function taskHistoryPath', copyStart);
+  assert.notEqual(copyStart, -1);
+  assert.notEqual(copyEnd, -1);
+  const copyReport = appSource.slice(copyStart, copyEnd);
+  assert.match(appSource, /function isSponsorLogEntry\(entry\)/);
+  assert.match(copyReport, /userLogEntries\s*\.filter\(\(entry\) => !isSponsorLogEntry\(entry\)\)/);
+  assert.doesNotMatch(copyReport, /userLogEntries\.map\(/);
+});

@@ -780,6 +780,10 @@ function appendExportSuccessSponsorLogs(outcome, action) {
   appendUserLog(FLUXION_REDEEM_MESSAGE, 'success', 'fluxion-redeem');
 }
 
+function isSponsorLogEntry(entry) {
+  return entry?.presentation === 'fluxion-register' || entry?.presentation === 'fluxion-redeem';
+}
+
 function compactLogSummary(message, maxLength = 220) {
   const text = normalizeLogMessage(message)
     .replace(/\s+/g, ' ')
@@ -934,7 +938,9 @@ async function copyDeveloperReport() {
     }
   }
 
-  const userLines = userLogEntries.map((entry) => `[${formatUserDateTime(entry.time)}] [${entry.type}] ${entry.message}`);
+  const userLines = userLogEntries
+    .filter((entry) => !isSponsorLogEntry(entry))
+    .map((entry) => `[${formatUserDateTime(entry.time)}] [${entry.type}] ${entry.message}`);
   const detailLines = detailLogEntries.map(formatDeveloperDetailEntry);
   const report = [
     '# 万能导错误报告',
@@ -2943,6 +2949,92 @@ function renderTaskCenterPage() {
   bindWorkbenchActions(contentArea);
 }
 
+async function requestNoticeImage(imageUrl) {
+  const safeUrl = safeNoticeImageUrl(imageUrl);
+  if (!safeUrl) {
+    return { success: false, errorMessage: '公告图片地址不在允许的 GitHub 文档范围内' };
+  }
+  try {
+    const result = await window.electronAPI.fetchRemoteImage(safeUrl);
+    if (!result?.success || !result.dataUrl) {
+      throw new Error(result?.error || '公告图片读取失败');
+    }
+    return { success: true, result };
+  } catch (error) {
+    return { success: false, errorMessage: error?.message || String(error) };
+  }
+}
+
+function replaceWithNoticeImageFallback(image, imageUrl, errorMessage) {
+  const placeholder = document.createElement('div');
+  placeholder.className = 'guide-image-fallback';
+  placeholder.setAttribute('role', 'status');
+  placeholder.title = errorMessage || '公告图片读取失败';
+
+  const title = document.createElement('strong');
+  title.textContent = image.alt ? `${image.alt}暂时无法加载` : '公告图片暂时无法加载';
+  placeholder.appendChild(title);
+
+  const detail = document.createElement('span');
+  detail.textContent = '请检查网络连接，公告文字仍可继续阅读。';
+  placeholder.appendChild(detail);
+
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'guide-image-retry';
+  retryButton.title = '重新加载这张图片';
+  retryButton.setAttribute('aria-label', '重新加载这张公告图片');
+  const retryIcon = document.createElement('span');
+  retryIcon.className = 'guide-image-retry-icon';
+  retryIcon.textContent = '\u21bb';
+  retryIcon.setAttribute('aria-hidden', 'true');
+  retryButton.appendChild(retryIcon);
+  retryButton.addEventListener('click', async () => {
+    retryButton.disabled = true;
+    retryButton.classList.add('is-loading');
+    const outcome = await requestNoticeImage(imageUrl);
+    if (outcome.success) {
+      image.src = outcome.result.dataUrl;
+      placeholder.replaceWith(image);
+      return;
+    }
+    placeholder.title = outcome.errorMessage;
+    retryButton.disabled = false;
+    retryButton.classList.remove('is-loading');
+  });
+  placeholder.appendChild(retryButton);
+
+  const openButton = document.createElement('button');
+  openButton.type = 'button';
+  openButton.className = 'guide-image-fallback-link';
+  openButton.textContent = '在 GitHub 查看原图';
+  openButton.addEventListener('click', () => window.electronAPI.openExternal(imageUrl));
+  placeholder.appendChild(openButton);
+  image.replaceWith(placeholder);
+}
+
+async function hydrateNoticeImages(container) {
+  const images = Array.from(container?.querySelectorAll?.('img[data-notice-image]') || []);
+  const pending = images.map((image) => ({
+    image,
+    imageUrl: image.dataset.noticeImage || ''
+  }));
+  const loadNext = async () => {
+    while (pending.length) {
+      const { image, imageUrl } = pending.shift();
+      const outcome = await requestNoticeImage(imageUrl);
+      if (outcome.success) {
+        image.src = outcome.result.dataUrl;
+        image.removeAttribute('data-notice-image');
+      } else if (image.isConnected) {
+        replaceWithNoticeImageFallback(image, imageUrl, outcome.errorMessage);
+      }
+    }
+  };
+  const workerCount = Math.min(3, pending.length);
+  await Promise.all(Array.from({ length: workerCount }, () => loadNext()));
+}
+
 function renderFluxionSponsor() {
   return `
     <details class="notice-sponsor" open>
@@ -2984,7 +3076,11 @@ function renderNoticeDocBody(selected) {
       </div>
     `;
   }
-  return markdownToHtml(source);
+  return markdownToHtml(source, {
+    resolveImageSource: (imageSource) => resolveNoticeImageSource(imageSource, selected),
+    allowRemoteImage: safeNoticeImageUrl,
+    remoteImageAttribute: 'data-notice-image'
+  });
 }
 
 function noticeSourceStatusText(status) {
@@ -3052,6 +3148,7 @@ function renderNoticeCenterPage() {
     ${renderFluxionSponsor()}
   `;
   bindNoticeCenterActions(contentArea);
+  hydrateNoticeImages(contentArea);
   if (noticeCenterState.status === 'idle') {
     loadNoticeCenter(false);
   } else if (
@@ -3461,11 +3558,7 @@ function renderAppView(viewId) {
 }
 
 function markdownInline(value) {
-  let text = escapeHtml(value);
-  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
-  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" data-external-link="true">$1</a>');
-  return text;
+  return escapeHtml(value);
 }
 
 function safeRemoteGuideImageUrl(value) {
@@ -3486,85 +3579,95 @@ function safeGuideImagePath(value) {
   return imagePath;
 }
 
-function markdownToHtml(markdown) {
-  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
-  const html = [];
-  let inCode = false;
-  let codeLines = [];
-  let listType = '';
-
-  const closeList = () => {
-    if (listType) {
-      html.push(`</${listType}>`);
-      listType = '';
-    }
-  };
-
-  const openList = (type, start = 1) => {
-    if (listType === type) return;
-    closeList();
-    const startAttribute = type === 'ol' && start > 1 ? ` start="${start}"` : '';
-    html.push(`<${type}${startAttribute}>`);
-    listType = type;
-  };
-
-  lines.forEach((line) => {
-    if (line.trim().startsWith('```')) {
-      if (inCode) {
-        html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-        codeLines = [];
-        inCode = false;
-      } else {
-        closeList();
-        inCode = true;
-      }
-      return;
-    }
-    if (inCode) {
-      codeLines.push(line);
-      return;
-    }
-    const trimmed = line.trim();
-    if (!trimmed) {
-      closeList();
-      return;
-    }
-    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      closeList();
-      const level = Math.min(4, heading[1].length + 1);
-      html.push(`<h${level}>${markdownInline(heading[2])}</h${level}>`);
-      return;
-    }
-    const image = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-    if (image) {
-      const imagePath = safeGuideImagePath(image[2]);
-      if (imagePath) {
-        closeList();
-        html.push(`<img class="guide-image" alt="${escapeHtml(image[1])}" data-guide-image="${escapeHtml(imagePath)}" loading="lazy">`);
-        return;
-      }
-    }
-    const ordered = trimmed.match(/^(\d+)[.)]\s+(.+)$/);
-    if (ordered) {
-      openList('ol', Number(ordered[1]));
-      html.push(`<li>${markdownInline(ordered[2])}</li>`);
-      return;
-    }
-    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
-    if (bullet) {
-      openList('ul');
-      html.push(`<li>${markdownInline(bullet[1])}</li>`);
-      return;
-    }
-    closeList();
-    html.push(`<p>${markdownInline(trimmed)}</p>`);
-  });
-  closeList();
-  if (inCode) {
-    html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+function safeNoticeImageUrl(value) {
+  const rawUrl = String(value || '').trim();
+  if (!rawUrl || typeof URL === 'undefined') return '';
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return '';
   }
-  return html.join('\n');
+  if (url.protocol !== 'https:' || url.hostname !== 'raw.githubusercontent.com') return '';
+  if (!url.pathname.startsWith('/tllovesxs/wandao/main/docs/')) return '';
+  if (!/\.(?:png|jpe?g|gif|webp)$/i.test(url.pathname)) return '';
+  return url.href;
+}
+
+function resolveNoticeImageSource(source, item) {
+  const baseUrl = noticeRawUrl(item);
+  if (!baseUrl || typeof URL === 'undefined') return '';
+  try {
+    return new URL(String(source || '').trim(), baseUrl).href;
+  } catch {
+    return '';
+  }
+}
+
+function renderMarkdownImage(token, options = {}) {
+  const source = token.attrGet('src') || '';
+  const resolvedSource = typeof options.resolveImageSource === 'function'
+    ? options.resolveImageSource(source)
+    : source;
+  const allowRemoteImage = typeof options.allowRemoteImage === 'function'
+    ? options.allowRemoteImage
+    : safeRemoteGuideImageUrl;
+  const remoteUrl = allowRemoteImage(resolvedSource);
+  const remoteAttribute = options.remoteImageAttribute || 'data-guide-image';
+  const localAttribute = options.localImageAttribute || 'data-guide-image';
+  const alt = token.content || token.attrGet('alt') || '';
+  if (remoteUrl) {
+    return `<img class="guide-image" alt="${escapeHtml(alt)}" ${remoteAttribute}="${escapeHtml(remoteUrl)}" loading="lazy">`;
+  }
+  const imagePath = safeGuideImagePath(resolvedSource);
+  if (!imagePath) return '';
+  return `<img class="guide-image" alt="${escapeHtml(alt)}" ${localAttribute}="${escapeHtml(imagePath)}" loading="lazy">`;
+}
+
+function markdownToHtml(markdown, options = {}) {
+  const markdownItFactory = typeof window !== 'undefined' ? window.markdownit : null;
+  if (typeof markdownItFactory !== 'function') {
+    return String(markdown || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim() ? `<p>${escapeHtml(line.trim())}</p>` : '')
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  const renderer = markdownItFactory({
+    html: false,
+    breaks: false,
+    linkify: false,
+    typographer: false
+  });
+  renderer.core.ruler.push('wandao-safe-links', (state) => {
+    state.tokens.forEach((blockToken) => {
+      if (blockToken.type !== 'inline' || !Array.isArray(blockToken.children)) return;
+      blockToken.children.forEach((token, index) => {
+        if (token.type !== 'link_open') return;
+        const href = token.attrGet('href') || '';
+        if (/^https:\/\//i.test(href) || /^#[A-Za-z][A-Za-z0-9_.:-]*$/.test(href)) return;
+        token.hidden = true;
+        for (let closeIndex = index + 1; closeIndex < blockToken.children.length; closeIndex += 1) {
+          const closeToken = blockToken.children[closeIndex];
+          if (closeToken.type === 'link_close' && closeToken.level === token.level) {
+            closeToken.hidden = true;
+            break;
+          }
+        }
+      });
+    });
+  });
+  const defaultLinkOpen = renderer.renderer.rules.link_open
+    || ((tokens, index, renderOptions, _env, self) => self.renderToken(tokens, index, renderOptions));
+  renderer.renderer.rules.link_open = (tokens, index, renderOptions, env, self) => {
+    const token = tokens[index];
+    const href = token.attrGet('href') || '';
+    if (/^https:\/\//i.test(href)) token.attrSet('data-external-link', 'true');
+    return defaultLinkOpen(tokens, index, renderOptions, env, self);
+  };
+  renderer.renderer.rules.image = (tokens, index) => renderMarkdownImage(tokens[index], options);
+  return renderer.render(String(markdown || ''));
 }
 
 function valueAtPath(source, pathExpression) {
