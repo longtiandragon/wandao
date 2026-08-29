@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-07-28",
+  "updatedAt": "2026-08-29",
   "repository": "https://github.com/tllovesxs/wandao",
   "items": [
     {
@@ -32,6 +32,21 @@
         "提示词"
       ],
       "path": "prompts/项目学习导师提示词.md"
+    },
+    {
+      "id": "fluxion-ai-getting-started",
+      "type": "tutorial",
+      "title": "Fluxion AI 新手引导",
+      "summary": "欢迎使用 Fluxion AI！本页面将帮助你快速上手，了解如何充值、创建 API Key、配置客户端，以及解决常见问题。",
+      "date": "2026-08-29",
+      "badge": "Fluxion AI",
+      "tags": [
+        "教程",
+        "Fluxion AI",
+        "API Key",
+        "客户端配置"
+      ],
+      "path": "docs/tutorials/fluxion-ai-getting-started.md"
     }
   ]
 }
