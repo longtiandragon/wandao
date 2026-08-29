@@ -13,6 +13,10 @@ const GITHUB_REPO_URL = 'https://github.com/tllovesxs/wandao';
 const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/tllovesxs/wandao/main/';
 const GITHUB_BLOB_BASE = 'https://github.com/tllovesxs/wandao/blob/main/';
 const NOTICE_CENTER_MANIFEST_URL = `${GITHUB_RAW_BASE}docs/tutorial-announcements.json`;
+const FLUXION_SITE_URL = 'https://fluxionai.space/';
+const FLUXION_REGISTER_URL = 'https://fluxionai.space/register?source=github&campaign=wandao';
+const FLUXION_REDEEM_MESSAGE = '兑换码：WANNENGDAO — 登录后在工作台「兑换」输入，即可获得 $3 API 额度。';
+const FLUXION_SPONSOR_BANNER_URL = `${GITHUB_RAW_BASE}docs/images/fluxion-ai-sponsor-banner.png`;
 const DEFAULT_BROWSER_DOWNLOAD_URL = 'https://www.google.com/chrome/';
 let pluginCatalogState = { status: 'idle', plugins: [], query: '', error: '', offline: false, experimentalError: '', updatedAt: '' };
 let pluginCatalogRequestId = 0;
@@ -651,11 +655,32 @@ function formatLogTime(value) {
   return formatUserDateTime(value);
 }
 
-function createLogEntryElement(message, type = 'info', time = new Date().toISOString()) {
+function createLogEntryElement(message, type = 'info', time = new Date().toISOString(), presentation = '') {
   const entry = document.createElement('div');
   entry.className = `log-entry ${type}`;
   const timestamp = formatLogTime(time);
-  entry.textContent = `[${timestamp}] ${message}`;
+  entry.appendChild(document.createTextNode(`[${timestamp}] `));
+
+  // 广告日志只渲染预定义的安全结构，不解析普通日志中的 Markdown 或 HTML。
+  if (presentation === 'fluxion-register' && message === FLUXION_REGISTER_URL) {
+    const link = document.createElement('a');
+    link.className = 'log-external-link';
+    link.href = FLUXION_REGISTER_URL;
+    link.textContent = FLUXION_REGISTER_URL;
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      window.electronAPI.openExternal(FLUXION_REGISTER_URL);
+    });
+    entry.appendChild(link);
+  } else if (presentation === 'fluxion-redeem' && message === FLUXION_REDEEM_MESSAGE) {
+    const label = document.createElement('strong');
+    label.textContent = '兑换码：';
+    const code = document.createElement('code');
+    code.textContent = 'WANNENGDAO';
+    entry.append(label, code, document.createTextNode(' — 登录后在工作台「兑换」输入，即可获得 $3 API 额度。'));
+  } else {
+    entry.appendChild(document.createTextNode(message));
+  }
   return entry;
 }
 
@@ -672,16 +697,16 @@ function trimRenderedLogEntries(logContent) {
   }
 }
 
-function renderLogEntry(message, type = 'info', time = new Date().toISOString()) {
+function renderLogEntry(message, type = 'info', time = new Date().toISOString(), presentation = '') {
   const logContent = document.getElementById('log-content');
   if (!logContent) return;
-  logContent.appendChild(createLogEntryElement(message, type, time));
+  logContent.appendChild(createLogEntryElement(message, type, time, presentation));
   trimRenderedLogEntries(logContent);
   logContent.scrollTop = logContent.scrollHeight;
 }
 
 function renderUserLogEntry(entry) {
-  renderLogEntry(entry.message, entry.type, entry.time);
+  renderLogEntry(entry.message, entry.type, entry.time, entry.presentation || '');
 }
 
 function renderDetailedLogEntry(entry) {
@@ -714,7 +739,7 @@ function renderLogPanel() {
       const event = entry.event ? `[${entry.event}] ` : '';
       fragment.appendChild(createLogEntryElement(`${source}${event}${entry.message}`, entry.type, entry.time));
     } else {
-      fragment.appendChild(createLogEntryElement(entry.message, entry.type, entry.time));
+      fragment.appendChild(createLogEntryElement(entry.message, entry.type, entry.time, entry.presentation || ''));
     }
   });
   logContent.appendChild(fragment);
@@ -727,16 +752,32 @@ function toggleLogViewMode() {
   renderLogPanel();
 }
 
-function appendUserLog(message, type = 'info') {
+function appendUserLog(message, type = 'info', presentation = '') {
   const text = normalizeLogMessage(message);
   const entry = {
     time: new Date().toISOString(),
     type,
-    message: text
+    message: text,
+    presentation
   };
   userLogEntries.push(entry);
   trimLogStore(userLogEntries);
   if (logViewMode === 'user') renderUserLogEntry(entry);
+}
+
+function isExportAction(action) {
+  if (action && typeof action === 'object') {
+    return String(action.kind || '').toLowerCase() === 'export'
+      || String(action.actionName || '').trim() === '导出';
+  }
+  return String(action || '').trim().toLowerCase() === 'export'
+    || String(action || '').trim() === '导出';
+}
+
+function appendExportSuccessSponsorLogs(outcome, action) {
+  if (outcome !== 'completed' || !isExportAction(action)) return;
+  appendUserLog(FLUXION_REGISTER_URL, 'success', 'fluxion-register');
+  appendUserLog(FLUXION_REDEEM_MESSAGE, 'success', 'fluxion-redeem');
 }
 
 function compactLogSummary(message, maxLength = 220) {
@@ -1718,6 +1759,7 @@ async function resumeTask(task) {
         return;
       }
       log(outcome === 'partial' ? '历史任务继续执行部分完成，请查看失败项' : '历史任务继续执行完成', outcome === 'partial' ? 'warn' : 'success');
+      appendExportSuccessSponsorLogs(outcome, task.action);
       if (result.data) log(JSON.stringify(result.data, null, 2), 'success');
       finishProgressForTaskResult(result, '历史任务继续执行完成', { provider: task.providerId, mode: task.action });
     } else if (outcome === 'stopped') {
@@ -2901,6 +2943,20 @@ function renderTaskCenterPage() {
   bindWorkbenchActions(contentArea);
 }
 
+function renderFluxionSponsor() {
+  return `
+    <details class="notice-sponsor" open>
+      <summary><strong>Fluxion AI · 为 AI 辅助学习提供支持</strong></summary>
+      <a class="notice-sponsor-banner-link" href="${escapeHtml(FLUXION_SITE_URL)}" data-external-link="true">
+        <img class="notice-sponsor-banner" alt="Fluxion AI：统一接入与管理全球主流 AI 模型；多线路动态路由、价格与用量透明。兑换码 WANNENGDAO 可获得 3 美元 API 额度" data-notice-image="${escapeHtml(FLUXION_SPONSOR_BANNER_URL)}" loading="lazy">
+      </a>
+      <blockquote>本区为赞助信息。万能导始终完全开源免费，AI 辅助学习不绑定任何模型或 API 服务。</blockquote>
+      <p><a href="${escapeHtml(FLUXION_SITE_URL)}" data-external-link="true"><strong>Fluxion AI</strong></a> 面向个人开发者、技术团队与企业，通过统一 API 接入全球主流 AI 模型，并以多线路调度提升可用性；模型质量、使用情况和费用可在一个平台集中管理。</p>
+      <p>灵活的线路与计费方案带来更具竞争力的调用成本，实时价格和每笔消费均可查阅。</p>
+    </details>
+  `;
+}
+
 function renderNoticeDocBody(selected) {
   const selectedId = selected?.id || '';
   const bodyMatchesSelection = noticeCenterState.selectedBodyId === selectedId;
@@ -2993,6 +3049,7 @@ function renderNoticeCenterPage() {
         </div>
       </article>
     </section>
+    ${renderFluxionSponsor()}
   `;
   bindNoticeCenterActions(contentArea);
   if (noticeCenterState.status === 'idle') {
@@ -4114,7 +4171,10 @@ function initializeManifestProviderHandlers(provider, actions, fields) {
           log(`${action.label || provider.title}\u5df2\u505c\u6b62\uff0c\u5df2\u5b8c\u6210\u9879\u76ee\u4f1a\u5728\u4e0b\u6b21\u7ee7\u7eed\u65f6\u8df3\u8fc7\u3002`, 'warn');
           finishProgress('stopped', `${action.label || '\u4efb\u52a1'}\u5df2\u505c\u6b62`);
         } else if (result.success) {
+          const actionMode = action.actionName || action.label || '执行';
+          const outcome = taskResultStatus(result, { provider: provider.id, mode: actionMode });
           log(`完成：${action.label || provider.title}`, 'success');
+          appendExportSuccessSponsorLogs(outcome, action);
           if (result.data) log(JSON.stringify(result.data, null, 2), 'success');
           applyActionUpdates(provider, action, result.data || {});
           if (action.kind === 'scan' || action.scanToc || action.id === 'scan') {
@@ -6213,6 +6273,7 @@ async function handleExport(toolId) {
     } else if (result.success) {
       const outcome = taskResultStatus(result, { provider: toolId, mode: actionName });
       log(outcome === 'paused' ? `${actionName}因频率限制安全暂停，可稍后继续。` : `${actionName}完成`, outcome === 'paused' ? 'warn' : 'success');
+      appendExportSuccessSponsorLogs(outcome, actionName);
       if (result.data) {
         log(JSON.stringify(result.data, null, 2), 'success');
       }
