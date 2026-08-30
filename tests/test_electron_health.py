@@ -465,6 +465,29 @@ class TauriHealthTests(unittest.TestCase):
         self.assertIn('"plugin-download-progress"', commands_rs)
         self.assertIn("onPluginDownloadProgress", bridge_js)
 
+    def test_platform_center_syncs_plugin_updates_with_the_unified_checker(self) -> None:
+        app_js = read_text("wandao_electron/renderer/app.js")
+        bridge_js = read_text("wandao_electron/renderer/tauri_bridge.js")
+        index_html = read_text("wandao_electron/renderer/index.html")
+        styles = read_text("wandao_electron/renderer/styles.css")
+        menu_rs = read_text("wandao_electron/src-tauri/src/app_menu.rs")
+        update_state = read_text("wandao_electron/renderer/plugin_update_state.js")
+
+        self.assertIn("platformPluginUpdateCandidates", app_js)
+        self.assertIn("data-platform-update", app_js)
+        self.assertIn("runPlatformPluginUpdate", app_js)
+        self.assertIn("renderPluginCatalogViews", app_js)
+        self.assertIn("loadPluginCatalog(true)", app_js)
+        self.assertIn("Promise.all([", app_js)
+        self.assertIn("checkApplicationUpdate()", app_js)
+        self.assertIn("window.setTimeout(() => checkForUpdates(true), 1000)", app_js)
+        self.assertIn("platform-update-badge", styles)
+        self.assertIn("platform-update-action", styles)
+        self.assertIn('<script src="plugin_update_state.js"></script>', index_html)
+        self.assertIn("onUpdateCheckRequested", bridge_js)
+        self.assertIn('"request-update-check"', menu_rs)
+        self.assertIn("platformUpdateCandidates", update_state)
+
     def test_plugin_runtime_migrates_known_legacy_state_without_exposing_the_data_root(self) -> None:
         commands_rs = read_text("wandao_electron/src-tauri/src/commands.rs")
         providers_rs = read_text("wandao_electron/src-tauri/src/providers.rs")

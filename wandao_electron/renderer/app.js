@@ -20,6 +20,8 @@ let pluginCatalogState = { status: 'idle', plugins: [], query: '', error: '', of
 let pluginCatalogRequestId = 0;
 const pluginOperationState = new Map();
 let pluginBulkUpdateRunning = false;
+let updateCheckPromise = null;
+let updateCheckAnnounce = false;
 let customPluginMessageCleanup = null;
 const FALLBACK_NOTICE_CENTER = {
   version: 1,
@@ -519,50 +521,82 @@ function hideUpdateBanner() {
   if (banner) banner.hidden = true;
 }
 
-async function checkForUpdates(silent = false) {
+function setUpdateCheckControls(checking) {
+  document.querySelectorAll('#btn-check-update, [data-settings-action="check-update"]').forEach((button) => {
+    if (!button.dataset.updateCheckLabel) button.dataset.updateCheckLabel = button.textContent || '检查更新';
+    button.disabled = checking;
+    button.textContent = checking ? '检查中…' : button.dataset.updateCheckLabel;
+  });
+}
+
+async function checkApplicationUpdate() {
   if (!window.electronAPI.checkForUpdates) {
-    if (!silent) alert('当前版本暂不支持在线检查更新。');
-    return;
-  }
-  const button = document.getElementById('btn-check-update');
-  if (button && !silent) {
-    button.disabled = true;
-    button.textContent = '检查中...';
+    return { success: false, unsupported: true, error: '当前版本暂不支持在线检查万能导更新。' };
   }
   try {
     const result = await window.electronAPI.checkForUpdates();
-    if (!result.success) {
-      if (!silent) {
-        log(`检查更新失败：${result.error}`, 'error');
-        alert(`检查更新失败：${result.error}`);
-      }
-      return;
-    }
+    if (!result?.success) return { success: false, error: result?.error || '未知错误' };
     const info = result.data || {};
     latestReleaseUrl = info.releaseUrl || latestReleaseUrl;
     if (info.hasUpdate) {
       showUpdateBanner(info);
-      log(`发现新版本：v${info.latestVersion}，当前版本：v${info.currentVersion}`, 'success');
-      if (!silent) {
-        alert(info.canInstall
-          ? `发现新版本 v${info.latestVersion}，可以在顶部提示中下载安装。`
-          : `发现新版本 v${info.latestVersion}，请点击顶部提示打开下载页。`);
-      }
-    } else if (!silent) {
+      log(`发现万能导新版本：v${info.latestVersion}，当前版本：v${info.currentVersion}`, 'success');
+    } else {
       hideUpdateBanner();
-      log(`当前已是最新版本：v${info.currentVersion}`, 'success');
-      alert(`当前已是最新版本：v${info.currentVersion}`);
     }
+    return { success: true, info };
   } catch (error) {
+    return { success: false, error: formatError(error) };
+  }
+}
+
+function updateCheckSummary(application, plugins) {
+  const appInfo = application.info || {};
+  const appText = application.success
+    ? (appInfo.hasUpdate
+      ? `万能导：发现 v${appInfo.latestVersion}，已显示更新提示。`
+      : `万能导：已是最新版本 v${appInfo.currentVersion || '未知'}。`)
+    : `万能导：检查失败（${application.error || '未知错误'}）。`;
+  const pluginUpdateCount = pluginUpdateCandidates().length;
+  const pluginText = plugins?.offline
+    ? '插件：暂时无法连接在线插件库，已保留本地插件状态。'
+    : plugins?.success
+    ? (pluginUpdateCount
+      ? `插件：${pluginUpdateCount} 个可更新，已在平台卡片和插件中心标记。`
+      : '插件：平台插件均为最新。')
+    : `插件：检查失败（${plugins?.error || '未知错误'}）。`;
+  return { appText, pluginText, pluginUpdateCount };
+}
+
+async function checkForUpdates(silent = false) {
+  if (updateCheckPromise) {
     if (!silent) {
-      log(`检查更新失败：${formatError(error)}`, 'error');
-      alert(`检查更新失败：${formatError(error)}`);
+      updateCheckAnnounce = true;
+      setUpdateCheckControls(true);
     }
+    return updateCheckPromise;
+  }
+  updateCheckAnnounce = !silent;
+  if (!silent) setUpdateCheckControls(true);
+  updateCheckPromise = (async () => {
+    const [application, plugins] = await Promise.all([
+      checkApplicationUpdate(),
+      loadPluginCatalog(true)
+    ]);
+    const summary = updateCheckSummary(application, plugins);
+    if (updateCheckAnnounce) {
+      const level = application.success && plugins?.success ? 'success' : 'warn';
+      log(`更新检查完成：${summary.appText} ${summary.pluginText}`, level);
+      alert(`${summary.appText}\n${summary.pluginText}`);
+    }
+    return { application, plugins, ...summary };
+  })();
+  try {
+    return await updateCheckPromise;
   } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = '检查更新';
-    }
+    updateCheckPromise = null;
+    updateCheckAnnounce = false;
+    setUpdateCheckControls(false);
   }
 }
 
@@ -2194,6 +2228,31 @@ function platformCapabilityTags(group) {
   return Array.from(tags);
 }
 
+function platformPluginUpdateCandidates(group) {
+  const helper = window.WandaoPluginUpdates?.platformUpdateCandidates;
+  if (typeof helper === 'function') return helper(group, pluginCatalogState.plugins);
+  const pluginIds = new Set((group?.providers || []).map((provider) => String(provider?.pluginId || '').trim()).filter(Boolean));
+  return pluginUpdateCandidates().filter((plugin) => pluginIds.has(String(plugin.id || '').trim()));
+}
+
+function platformUpdateBadgeHtml(updates) {
+  if (!updates.length) return '';
+  const label = updates.length === 1 ? '插件可更新' : `${updates.length} 个插件可更新`;
+  const title = updates.map((plugin) => plugin.name || plugin.id).join('、');
+  return `<span class="platform-update-badge" title="${escapeHtml(title)}" aria-label="${escapeHtml(label)}"><span aria-hidden="true">↑</span>${escapeHtml(label)}</span>`;
+}
+
+function platformUpdateActionHtml(group, updates) {
+  if (!updates.length) return '';
+  const updating = updates.some((plugin) => pluginOperationState.has(plugin.id));
+  const catalogLoading = pluginCatalogState.status === 'loading';
+  const label = updating
+    ? '正在更新…'
+    : (catalogLoading ? '检查更新中…' : (updates.length === 1 ? '更新插件' : `更新插件（${updates.length}）`));
+  const title = updates.map((plugin) => `${plugin.name || plugin.id} ${plugin.installedVersion ? `v${plugin.installedVersion} → ` : ''}v${plugin.version || '最新'}`).join('；');
+  return `<button class="btn-primary platform-update-action" data-platform-update="${escapeHtml(group.key)}" type="button" title="${escapeHtml(title)}" ${updating || catalogLoading ? 'disabled' : ''}>${escapeHtml(label)}</button>`;
+}
+
 function providerPlatformSiblings(provider) {
   const group = findPlatformGroup(platformKey(provider));
   return group ? group.providers : [provider];
@@ -2254,6 +2313,9 @@ function bindWorkbenchActions(root = document.getElementById('content-area')) {
     button.addEventListener('click', () => {
       if (!isRunning) switchTool(`platform:${button.dataset.platformKey}`);
     });
+  });
+  root.querySelectorAll('[data-platform-update]').forEach((button) => {
+    button.addEventListener('click', () => runPlatformPluginUpdate(button.dataset.platformUpdate, button));
   });
   root.querySelectorAll('[data-open-provider]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -2532,6 +2594,7 @@ function renderHomePage() {
 
 function renderPlatformCard(group) {
   const tags = platformCapabilityTags(group);
+  const updates = platformPluginUpdateCandidates(group);
   return `
     <article class="platform-card">
       <div class="platform-card-main">
@@ -2546,8 +2609,12 @@ function renderPlatformCard(group) {
         <div class="provider-tags">
           ${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join('')}
         </div>
+        ${updates.length ? `<div class="platform-card-status">${platformUpdateBadgeHtml(updates)}</div>` : ''}
       </div>
-      <button class="btn-secondary card-action" data-platform-key="${escapeHtml(group.key)}" type="button">查看操作 <span aria-hidden="true">→</span></button>
+      <div class="platform-card-actions">
+        ${platformUpdateActionHtml(group, updates)}
+        <button class="btn-secondary card-action" data-platform-key="${escapeHtml(group.key)}" type="button">查看操作 <span aria-hidden="true">→</span></button>
+      </div>
     </article>
   `;
 }
@@ -2885,7 +2952,7 @@ function renderSettingsPage() {
       <article class="settings-card settings-card-compact">
         <span class="card-eyebrow">应用</span>
         <h4>版本更新</h4>
-        <p>从 GitHub Releases 检查新版本。</p>
+        <p>同时检查万能导与平台插件的新版本。</p>
         <button class="btn-secondary" data-settings-action="check-update" type="button">检查更新</button>
       </article>
       <article class="settings-card settings-card-compact">
@@ -3282,6 +3349,8 @@ function refreshPluginProgressUi(pluginId) {
 }
 
 function pluginUpdateCandidates() {
+  const helper = window.WandaoPluginUpdates?.availablePluginUpdates;
+  if (typeof helper === 'function') return helper(pluginCatalogState.plugins);
   return pluginCatalogState.plugins.filter((plugin) => plugin.updateAvailable && plugin.compatibility?.compatible !== false);
 }
 
@@ -3325,22 +3394,47 @@ function renderPluginCard(plugin) {
 }
 
 async function loadPluginCatalog(refresh = false) {
-  if (!window.electronAPI.getPluginCatalog) return;
+  if (!window.electronAPI.getPluginCatalog) {
+    return { success: false, unsupported: true, error: '当前版本暂不支持在线检查插件更新。' };
+  }
   const requestId = ++pluginCatalogRequestId;
+  const previousPlugins = pluginCatalogState.plugins;
   pluginCatalogState = { ...pluginCatalogState, status: 'loading', error: '' };
+  renderPluginCatalogViews();
+  try {
+    const result = await window.electronAPI.getPluginCatalog({ refresh });
+    if (requestId !== pluginCatalogRequestId) return { success: false, stale: true };
+    const success = result?.success === true;
+    const error = result?.registryError || result?.error || '';
+    pluginCatalogState = {
+      status: success ? 'ready' : 'error',
+      plugins: success && Array.isArray(result?.plugins) ? result.plugins : previousPlugins,
+      query: pluginCatalogState.query,
+      error,
+      offline: Boolean(result?.offline),
+      experimentalError: result?.experimentalError || '',
+      updatedAt: result?.registryUpdatedAt || pluginCatalogState.updatedAt || ''
+    };
+    renderPluginCatalogViews();
+    return { success, offline: Boolean(result?.offline), error };
+  } catch (error) {
+    if (requestId !== pluginCatalogRequestId) return { success: false, stale: true };
+    const message = formatError(error);
+    pluginCatalogState = {
+      ...pluginCatalogState,
+      status: 'error',
+      plugins: previousPlugins,
+      error: message,
+      offline: false
+    };
+    renderPluginCatalogViews();
+    return { success: false, error: message };
+  }
+}
+
+function renderPluginCatalogViews() {
   if (currentTool === 'plugin-center') renderPluginCenterPage();
-  const result = await window.electronAPI.getPluginCatalog({ refresh });
-  if (requestId !== pluginCatalogRequestId) return;
-  pluginCatalogState = {
-    status: result?.success ? 'ready' : 'error',
-    plugins: Array.isArray(result?.plugins) ? result.plugins : [],
-    query: pluginCatalogState.query,
-    error: result?.registryError || result?.error || '',
-    offline: Boolean(result?.offline),
-    experimentalError: result?.experimentalError || '',
-    updatedAt: result?.registryUpdatedAt || ''
-  };
-  if (currentTool === 'plugin-center') renderPluginCenterPage();
+  if (currentTool === 'platform-center') renderPlatformCenterPage();
 }
 
 async function refreshProvidersAfterPluginChange() {
@@ -3350,7 +3444,7 @@ async function refreshProvidersAfterPluginChange() {
 
 async function installPluginFromCatalog(plugin) {
   pluginOperationState.set(plugin.id, { phase: 'preparing', receivedBytes: 0, totalBytes: 0 });
-  if (currentTool === 'plugin-center') renderPluginCenterPage();
+  renderPluginCatalogViews();
   try {
     const result = await window.electronAPI.installPlugin(plugin.id, plugin.channel || 'stable');
     if (!result?.success) throw new Error(result?.error || '插件操作失败');
@@ -3359,7 +3453,49 @@ async function installPluginFromCatalog(plugin) {
     return result;
   } finally {
     pluginOperationState.delete(plugin.id);
-    if (currentTool === 'plugin-center') renderPluginCenterPage();
+    renderPluginCatalogViews();
+  }
+}
+
+async function runPlatformPluginUpdate(groupKey, button) {
+  const group = findPlatformGroup(groupKey);
+  if (!group) return;
+  const candidates = platformPluginUpdateCandidates(group);
+  if (!candidates.length) {
+    await loadPluginCatalog(true);
+    return;
+  }
+  const originalButtonText = button.textContent;
+  button.disabled = true;
+  button.textContent = candidates.length === 1 ? '正在更新…' : `正在更新 0/${candidates.length}…`;
+  const failures = [];
+  let updatedCount = 0;
+  try {
+    for (const plugin of candidates) {
+      if (candidates.length > 1) button.textContent = `正在更新 ${updatedCount + 1}/${candidates.length}…`;
+      try {
+        await installPluginFromCatalog(plugin);
+        updatedCount += 1;
+        log(`插件已更新：${plugin.name || plugin.id}`, 'success');
+      } catch (error) {
+        failures.push(`${plugin.name || plugin.id}：${formatError(error)}`);
+        log(`插件更新失败：${plugin.name || plugin.id}：${formatError(error)}`, 'error');
+      }
+    }
+    if (updatedCount) await refreshProvidersAfterPluginChange();
+    await loadPluginCatalog(true);
+    if (failures.length) {
+      alert(`“${group.name}”插件更新完成，但 ${failures.length} 个失败：\n${failures.join('\n')}`);
+    } else if (updatedCount) {
+      log(`“${group.name}”的插件已更新`, 'success');
+    }
+  } catch (error) {
+    log(`插件更新失败：${formatError(error)}`, 'error');
+    alert(formatError(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = originalButtonText;
+    if (currentTool === 'platform-center') renderPlatformCenterPage();
   }
 }
 
@@ -7295,6 +7431,9 @@ document.addEventListener('DOMContentLoaded', () => {
     window.electronAPI.onAppInfo((message) => {
       log(message, 'success');
     });
+  }
+  if (window.electronAPI.onUpdateCheckRequested) {
+    window.electronAPI.onUpdateCheckRequested(() => checkForUpdates(false));
   }
   if (window.electronAPI.onUpdateProgress) {
     window.electronAPI.onUpdateProgress((payload) => {

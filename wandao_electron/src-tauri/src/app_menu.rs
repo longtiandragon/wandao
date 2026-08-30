@@ -3,7 +3,6 @@ use std::sync::{
     Arc,
 };
 
-use serde_json::Value;
 #[cfg(target_os = "macos")]
 use tauri::menu::AboutMetadata;
 use tauri::{
@@ -182,7 +181,7 @@ pub fn handle(app: &AppHandle, event: MenuEvent) {
         MENU_DOCS => open_url(app, PROJECT_DOCS),
         MENU_GITHUB => open_url(app, PROJECT_GITHUB),
         MENU_RELEASES => open_url(app, PROJECT_RELEASES),
-        MENU_CHECK_UPDATES => check_for_updates(app),
+        MENU_CHECK_UPDATES => request_update_check(app),
         MENU_ISSUES => open_url(app, PROJECT_ISSUES),
         MENU_COPY_WECHAT => copy_wechat(app),
         MENU_ABOUT => show_about(app),
@@ -287,39 +286,10 @@ fn open_url(app: &AppHandle, url: &'static str) {
     }
 }
 
-fn check_for_updates(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let message = match commands::check_for_updates(app.clone()).await {
-            Ok(result) if result.get("success").and_then(Value::as_bool) == Some(true) => {
-                let data = &result["data"];
-                if data.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-                    format!(
-                        "发现新版本：v{}",
-                        data.get("latestVersion")
-                            .and_then(Value::as_str)
-                            .unwrap_or("未知")
-                    )
-                } else {
-                    format!(
-                        "当前已是最新版本：v{}",
-                        data.get("currentVersion")
-                            .and_then(Value::as_str)
-                            .unwrap_or("未知")
-                    )
-                }
-            }
-            Ok(result) => format!(
-                "检查更新失败：{}",
-                result
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("未知错误")
-            ),
-            Err(error) => format!("检查更新失败：{error}"),
-        };
-        emit_app_info(&app, message);
-    });
+fn request_update_check(app: &AppHandle) {
+    if app.emit("request-update-check", ()).is_err() {
+        emit_app_info(app, "无法请求更新检查，请稍后重试。".to_string());
+    }
 }
 
 fn copy_wechat(app: &AppHandle) {

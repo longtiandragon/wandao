@@ -46,6 +46,7 @@
 
   const EVENT_NAMES = Object.freeze({
     onAppInfo: 'app-info',
+    onUpdateCheckRequested: 'request-update-check',
     onPythonLog: 'python-log',
     onPythonProcessState: 'python-process-state',
     onPluginDownloadProgress: 'plugin-download-progress',
@@ -185,6 +186,7 @@
       getAppPath: () => invokeCommand('get_app_path'),
 
       onAppInfo: (callback) => subscribe(EVENT_NAMES.onAppInfo, callback),
+      onUpdateCheckRequested: (callback) => subscribe(EVENT_NAMES.onUpdateCheckRequested, callback),
       onPythonLog: (callback) => subscribe(EVENT_NAMES.onPythonLog, callback),
       onPythonProcessState: (callback) => subscribe(EVENT_NAMES.onPythonProcessState, callback),
       onPluginDownloadProgress: (callback) => subscribe(EVENT_NAMES.onPluginDownloadProgress, callback),
