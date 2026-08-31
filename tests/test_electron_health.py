@@ -747,7 +747,7 @@ class TauriHealthTests(unittest.TestCase):
             if path.is_dir() and (path / "plugin.json").is_file()
         }
         self.assertEqual(declared_ids, repository_ids)
-        self.assertEqual(len(declared_ids), 18)
+        self.assertEqual(len(declared_ids), 17)
         self.assertIn("generate_bundled_plugin_hashes(&manifest_dir)", build_rs)
         self.assertIn('include!(concat!(env!("OUT_DIR"), "/bundled_plugin_hashes.rs"))', plugins_rs)
         self.assertIn("verify_bundled_plugin(&paths.bundled_plugins, &id)", commands_rs)

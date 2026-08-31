@@ -78,7 +78,6 @@ const PLATFORM_ORDER = [
   'ima',
   'notion'
 ];
-const PLATFORM_LAST_KEYS = new Set(['google-docs']);
 const PLATFORM_META = {
   feishu: {
     name: '飞书',
@@ -2167,12 +2166,6 @@ function platformSortIndex(key) {
   return index === -1 ? Number.MAX_SAFE_INTEGER : index;
 }
 
-function comparePlatformGroups(a, b) {
-  return Number(PLATFORM_LAST_KEYS.has(a.key)) - Number(PLATFORM_LAST_KEYS.has(b.key))
-    || platformSortIndex(a.key) - platformSortIndex(b.key)
-    || String(a.name).localeCompare(String(b.name), 'zh-Hans-CN');
-}
-
 function platformGroups() {
   const map = new Map();
   allProviders().forEach((provider) => {
@@ -2193,7 +2186,10 @@ function platformGroups() {
         })
       };
     })
-    .sort(comparePlatformGroups);
+    .sort((a, b) => {
+      return platformSortIndex(a.key) - platformSortIndex(b.key)
+        || String(a.name).localeCompare(String(b.name), 'zh-Hans-CN');
+    });
 }
 
 function findPlatformGroup(key) {

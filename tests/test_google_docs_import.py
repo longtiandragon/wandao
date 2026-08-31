@@ -34,7 +34,7 @@ class GoogleDocsImportManifestTests(unittest.TestCase):
         fields = {field["name"]: field for field in manifest["fields"]}
         actions = {action["id"]: action for action in manifest["actions"]}
 
-        self.assertEqual(plugin_manifest["version"], "1.0.1")
+        self.assertEqual(plugin_manifest["version"], "1.0.0")
         self.assertEqual(plugin_manifest["core"]["minVersion"], "1.3.5")
         self.assertEqual(
             plugin_manifest["entrypoints"]["providers"],
