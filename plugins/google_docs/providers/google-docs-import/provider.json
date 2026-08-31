@@ -30,7 +30,7 @@
       "name": "quick_start",
       "label": "快速开始",
       "type": "notice",
-      "markdown": "### 首次授权一次，之后一步导入\n\n- **首次使用：**选择 OAuth JSON，点击“授权 Google Docs”。若应用仍为测试状态，Chrome 中登录的账号必须已加入该 Cloud 项目的测试用户。\n- **以后导入：**只需选择 Markdown 根目录，点击“开始导入”；不必重复选择 JSON 或授权。\n\n首次使用请先按下方教程启用 Drive API、添加测试用户，并创建“桌面应用”OAuth 客户端。Pandoc 会自动下载并校验，无需用户安装；预览和单篇测试均为可选操作。"
+      "markdown": "### 首次授权一次，之后一步导入\n\n- **首次使用：** 选择 OAuth JSON，点击“授权 Google Docs”。若应用仍为测试状态，Chrome 中登录的账号必须已加入该 Cloud 项目的测试用户。\n- **以后导入：** 只需选择 Markdown 根目录，点击“开始导入”；不必重复选择 JSON 或授权。\n\n首次使用请先按下方教程启用 Drive API、添加测试用户，并创建“桌面应用”OAuth 客户端。Pandoc 会自动下载并校验，无需用户安装；预览和单篇测试均为可选操作。"
     },
     {
       "name": "oauth_client",

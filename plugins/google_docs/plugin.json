@@ -4,7 +4,7 @@
   "id": "google_docs",
   "name": "Google Docs",
   "description": "把本地 Markdown 批量导入 Google 文档，并尽量保留图片、公式和代码样式。",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "community",
   "homepage": "https://docs.google.com/",
   "license": "AGPL-3.0-only",

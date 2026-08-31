@@ -75,6 +75,7 @@ PANDOC_TIMEOUT_SECONDS = 180
 DRIVE_RETRY_STATUSES = {429, 500, 502, 503, 504}
 DRIVE_RETRY_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
 DRIVE_RETRY_ATTEMPTS = 3
+SCAN_SAMPLE_LIMIT = 20
 LOCAL_IMAGE_SUFFIXES = {
     ".png",
     ".jpg",
@@ -557,6 +558,59 @@ def _copy_image_target(
     return destination.name, len(content)
 
 
+def safe_resource_reference(value: str) -> str:
+    """Keep resource diagnostics useful without exposing URL or data URI secrets."""
+
+    text = str(value or "")
+    candidate = text.strip()
+    if candidate.lower().startswith("data:"):
+        media_type_match = re.match(
+            r"^data:([a-z0-9.+-]+/[a-z0-9.+-]+)", candidate, re.IGNORECASE
+        )
+        media_type = (
+            media_type_match.group(1).lower() if media_type_match else "image/*"
+        )
+        return f"data:{media_type};base64,[内容已省略]"
+
+    def without_userinfo(authority: str) -> str:
+        return authority.rsplit("@", 1)[-1]
+
+    def sanitize_unparsed_url(raw: str) -> str:
+        prefix = ""
+        remainder = raw
+        if "://" in raw:
+            scheme, remainder = raw.split("://", 1)
+            prefix = f"{scheme}://"
+        elif raw.startswith("//"):
+            prefix = "//"
+            remainder = raw[2:]
+        if prefix:
+            authority, separator, path = remainder.partition("/")
+            remainder = without_userinfo(authority)
+            if separator:
+                remainder += f"/{path}"
+        return f"{prefix}{remainder}".split("?", 1)[0].split("#", 1)[0][:500]
+
+    try:
+        parts = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return sanitize_unparsed_url(candidate)
+    if parts.netloc or (
+        parts.scheme
+        and not (
+            len(parts.scheme) == 1
+            and len(candidate) >= 3
+            and candidate[1:3] in {":\\", ":/"}
+        )
+    ):
+        # User info may also contain a password, so retain only host/port.
+        netloc = without_userinfo(parts.netloc)
+        return urllib.parse.urlunsplit(
+            (parts.scheme, netloc, parts.path, "", "")
+        )[:500]
+    return text[:500]
+
+
 def stage_ast_images(
     ast: dict[str, Any], source_file: Path, source_root: Path, stage: Path
 ) -> list[dict[str, str]]:
@@ -564,8 +618,9 @@ def stage_ast_images(
     total_bytes = 0
     image_index = 0
 
-    def visit(value: Any) -> None:
-        nonlocal image_index, total_bytes
+    stack: list[Any] = [ast]
+    while stack:
+        value = stack.pop()
         if isinstance(value, dict):
             if (
                 value.get("t") == "Image"
@@ -591,15 +646,18 @@ def stage_ast_images(
                         total_bytes += size
                         destination[0] = local
                     except (GoogleDocsImportError, OSError) as exc:
-                        failures.append({"resource": original[:500], "error": str(exc)})
+                        failures.append(
+                            {
+                                "resource": safe_resource_reference(original),
+                                "error": str(exc),
+                            }
+                        )
                         destination[0] = "wandao-missing-image"
-            for child in value.values():
-                visit(child)
+            # Reverse the children to preserve the previous depth-first visit order.
+            stack.extend(reversed(tuple(value.values())))
         elif isinstance(value, list):
-            for child in value:
-                visit(child)
+            stack.extend(reversed(value))
 
-    visit(ast)
     return failures
 
 
@@ -633,9 +691,15 @@ def markdown_to_docx(
             ast = json.loads(ast_text)
         except json.JSONDecodeError as exc:
             raise GoogleDocsImportError("Pandoc 返回了无效的中间文档") from exc
+        except RecursionError as exc:
+            raise GoogleDocsImportError("Pandoc 中间文档嵌套过深") from exc
         resource_failures = stage_ast_images(ast, source_file, source_root, stage)
         ast_path = stage / "document.json"
-        ast_path.write_text(json.dumps(ast, ensure_ascii=False), encoding="utf-8")
+        try:
+            serialized_ast = json.dumps(ast, ensure_ascii=False)
+        except RecursionError as exc:
+            raise GoogleDocsImportError("Pandoc 中间文档嵌套过深") from exc
+        ast_path.write_text(serialized_ast, encoding="utf-8")
         staged_docx = stage / "document.docx"
         _run_pandoc(
             [
@@ -1170,13 +1234,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.scan_source:
             root, files = _resolve_sources(args, single=False)
+            sample_files = [
+                path.relative_to(root).as_posix()
+                for path in files[:SCAN_SAMPLE_LIMIT]
+            ]
             emit_json(
                 {
                     "provider": PROVIDER_ID,
                     "mode": "plan",
                     "sourceDir": str(root),
                     "totalDocs": len(files),
-                    "files": [str(path.relative_to(root)) for path in files],
+                    "sampleFiles": sample_files,
                 }
             )
             return 0

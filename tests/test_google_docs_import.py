@@ -34,7 +34,7 @@ class GoogleDocsImportManifestTests(unittest.TestCase):
         fields = {field["name"]: field for field in manifest["fields"]}
         actions = {action["id"]: action for action in manifest["actions"]}
 
-        self.assertEqual(plugin_manifest["version"], "1.0.0")
+        self.assertEqual(plugin_manifest["version"], "1.0.1")
         self.assertEqual(plugin_manifest["core"]["minVersion"], "1.3.5")
         self.assertEqual(
             plugin_manifest["entrypoints"]["providers"],
@@ -44,7 +44,10 @@ class GoogleDocsImportManifestTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "experimental")
         self.assertTrue(manifest["capabilities"]["import"])
         self.assertEqual(manifest["fields"][0]["type"], "notice")
-        self.assertIn("首次授权一次，之后一步导入", manifest["fields"][0]["markdown"])
+        notice_markdown = manifest["fields"][0]["markdown"]
+        self.assertIn("首次授权一次，之后一步导入", notice_markdown)
+        self.assertIn("**首次使用：** 选择", notice_markdown)
+        self.assertIn("**以后导入：** 只需", notice_markdown)
         self.assertEqual(fields["source_dir"]["type"], "directory")
         self.assertEqual(fields["source_file"]["type"], "file")
         self.assertNotIn("prepare", actions)
@@ -335,7 +338,7 @@ class MarkdownResourceStagingTests(unittest.TestCase):
             self.assertRegex(target, r"^image-0001-[0-9a-f]{12}\.png$")
             self.assertEqual((Path(stage_tmp) / target).read_bytes(), PNG)
 
-    def test_remote_and_escaping_images_are_not_passed_to_docx_writer(self) -> None:
+    def test_failed_resource_references_are_safe_and_still_actionable(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmp,
             tempfile.TemporaryDirectory() as stage_tmp,
@@ -343,16 +346,57 @@ class MarkdownResourceStagingTests(unittest.TestCase):
             root = Path(tmp).resolve()
             source = root / "note.md"
             source.write_text("test", encoding="utf-8")
-            for target in ("https://example.com/private.png", "../outside.png"):
+            targets = {
+                (
+                    "https://user:password@example.com/private.png"
+                    "?X-Amz-Signature=secret#fragment"
+                ): "https://example.com/private.png",
+                (
+                    "//user:password@example.com/protocol-relative.png"
+                    "?token=secret#fragment"
+                ): "//example.com/protocol-relative.png",
+                (
+                    "https://user:password@[invalid/private.png"
+                    "?token=secret#fragment"
+                ): "https://[invalid/private.png",
+                "../outside.png": "../outside.png",
+                "data:image/png;base64,NOT_A_SECRET": (
+                    "data:image/png;base64,[内容已省略]"
+                ),
+            }
+            for target, expected_reference in targets.items():
                 with self.subTest(target=target):
                     ast = self.ast_for(target)
                     failures = google_import.stage_ast_images(
                         ast, source, root, Path(stage_tmp)
                     )
                     self.assertEqual(len(failures), 1)
+                    self.assertEqual(failures[0]["resource"], expected_reference)
                     self.assertEqual(
                         ast["blocks"][0]["c"][0]["c"][2][0], "wandao-missing-image"
                     )
+
+    def test_ast_image_staging_handles_deep_nesting_without_recursion(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as stage_tmp,
+        ):
+            root = Path(tmp).resolve()
+            source = root / "note.md"
+            source.write_text("test", encoding="utf-8")
+            image = self.ast_for("missing.png")["blocks"][0]["c"][0]
+            nested = image
+            for _ in range(2_000):
+                nested = [nested]
+            ast = {"blocks": nested}
+
+            failures = google_import.stage_ast_images(
+                ast, source, root, Path(stage_tmp)
+            )
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["resource"], "missing.png")
+        self.assertEqual(image["c"][2][0], "wandao-missing-image")
 
     def test_forged_image_and_svg_external_reference_are_rejected(self) -> None:
         with (
@@ -446,6 +490,46 @@ class MarkdownResourceStagingTests(unittest.TestCase):
         self.assertIn(
             "--from=gfm+tex_math_dollars-raw_html-yaml_metadata_block", calls[1]
         )
+
+    def test_markdown_to_docx_wraps_deep_json_parse_error(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(google_import, "_run_pandoc", return_value="{}"),
+            mock.patch.object(
+                google_import.json, "loads", side_effect=RecursionError("too deep")
+            ),
+        ):
+            root = Path(tmp).resolve()
+            source = root / "deep.md"
+            source.write_text("# Deep", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                google_import.GoogleDocsImportError, "中间文档嵌套过深"
+            ):
+                google_import.markdown_to_docx(
+                    Path("pandoc"), source, root, root / "result.docx"
+                )
+
+    def test_markdown_to_docx_wraps_deep_json_serialization_error(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                google_import, "_run_pandoc", return_value='{"blocks": []}'
+            ),
+            mock.patch.object(
+                google_import.json, "dumps", side_effect=RecursionError("too deep")
+            ),
+        ):
+            root = Path(tmp).resolve()
+            source = root / "deep.md"
+            source.write_text("# Deep", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                google_import.GoogleDocsImportError, "中间文档嵌套过深"
+            ):
+                google_import.markdown_to_docx(
+                    Path("pandoc"), source, root, root / "result.docx"
+                )
 
     def test_markdown_to_docx_removes_ooxml_forbidden_control_characters(self) -> None:
         seen_inputs: list[str] = []
@@ -746,7 +830,9 @@ class GoogleDriveImportTests(unittest.TestCase):
             mock.patch.object(
                 google_import, "markdown_to_docx", side_effect=fake_convert
             ),
-            mock.patch.object(google_import, "stable_docx_hash", return_value="a" * 64),
+            mock.patch.object(
+                google_import, "stable_docx_hash", return_value="a" * 64
+            ),
             mock.patch.object(
                 google_import, "find_existing_document", return_value=existing
             ),
@@ -806,6 +892,62 @@ class GoogleDriveImportTests(unittest.TestCase):
         self.assertEqual(result["resourceFailures"][0]["resource"], "missing.png")
         self.assertEqual(result["outcome"], "partial")
 
+    def test_deep_document_failure_does_not_stop_later_documents(self) -> None:
+        created = {
+            "id": "created-document",
+            "name": "Created Document",
+            "mimeType": google_import.GOOGLE_DOC_MIME,
+        }
+
+        def fake_convert(_executable, source, _root, destination):
+            if source.name == "deep.md":
+                raise google_import.GoogleDocsImportError(
+                    "Pandoc 中间文档嵌套过深"
+                )
+            destination.write_bytes(b"docx")
+            return []
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                google_import, "markdown_to_docx", side_effect=fake_convert
+            ),
+            mock.patch.object(google_import, "stable_docx_hash", return_value="a" * 64),
+            mock.patch.object(
+                google_import,
+                "_find_or_upload_document",
+                return_value=(created, False),
+            ),
+            mock.patch.object(
+                google_import, "pandoc_version", return_value="pandoc 3.10.2"
+            ),
+            mock.patch.object(google_import, "emit"),
+        ):
+            root = Path(tmp).resolve()
+            before = root / "before.md"
+            deep = root / "deep.md"
+            later = root / "later.md"
+            before.write_text("# Before", encoding="utf-8")
+            deep.write_text("# Deep", encoding="utf-8")
+            later.write_text("# Later", encoding="utf-8")
+
+            result = google_import.import_files(
+                "token",
+                Path("pandoc"),
+                [before, deep, later],
+                root,
+                progress_every=0,
+            )
+
+        self.assertEqual(result["processedCount"], 3)
+        self.assertEqual(result["failureCount"], 1)
+        self.assertEqual(result["successCount"], 2)
+        self.assertEqual(result["failures"][0]["relativePath"], "deep.md")
+        self.assertEqual(
+            [item["relativePath"] for item in result["imported"]],
+            ["before.md", "later.md"],
+        )
+
     def test_identical_content_from_different_source_paths_creates_two_documents(
         self,
     ) -> None:
@@ -856,6 +998,29 @@ class GoogleDriveImportTests(unittest.TestCase):
 
 
 class GoogleDocsImportCliTests(unittest.TestCase):
+    def test_scan_source_returns_only_a_bounded_file_sample(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(google_import, "emit_json") as emit_json,
+        ):
+            source_dir = Path(tmp)
+            for index in range(25):
+                (source_dir / f"note-{index:02d}.md").write_text(
+                    f"# Note {index}", encoding="utf-8"
+                )
+
+            exit_code = google_import.main(
+                ["--scan-source", "--source-dir", str(source_dir)]
+            )
+
+        plan = emit_json.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(plan["totalDocs"], 25)
+        self.assertEqual(len(plan["sampleFiles"]), google_import.SCAN_SAMPLE_LIMIT)
+        self.assertEqual(plan["sampleFiles"][0], "note-00.md")
+        self.assertEqual(plan["sampleFiles"][-1], "note-19.md")
+        self.assertNotIn("files", plan)
+
     def test_setup_failure_report_keeps_resolved_document_count(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmp,
