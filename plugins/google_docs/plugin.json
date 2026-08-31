@@ -1,0 +1,17 @@
+{
+  "$schema": "../plugin.schema.json",
+  "schemaVersion": 1,
+  "id": "google_docs",
+  "name": "Google Docs",
+  "description": "把本地 Markdown 批量导入 Google 文档，并尽量保留图片、公式和代码样式。",
+  "version": "1.0.0",
+  "publisher": "community",
+  "homepage": "https://docs.google.com/",
+  "license": "AGPL-3.0-only",
+  "core": { "minVersion": "1.3.5" },
+  "platforms": ["win32", "darwin", "linux"],
+  "entrypoints": {
+    "providers": ["providers/google-docs-import/provider.json"]
+  },
+  "permissions": ["browser-automation", "credentials", "filesystem:read", "filesystem:write", "network", "process"]
+}

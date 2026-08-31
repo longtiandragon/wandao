@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "id": "google-docs-import",
+  "platform": "google-docs",
+  "name": "Google Docs",
+  "title": "Google Docs Markdown 导入",
+  "navLabel": "Google Docs 导入",
+  "description": "批量导入本地 Markdown，并尽量保留图片、公式和代码样式。",
+  "type": "automation",
+  "group": "import",
+  "trustLevel": "community",
+  "status": "experimental",
+  "guide": "README.md",
+  "homepage": "https://docs.google.com/",
+  "tags": ["导入", "Markdown", "DOCX", "图片", "公式", "代码块", "OAuth"],
+  "capabilities": {
+    "export": false,
+    "import": true,
+    "guide": true,
+    "login": true,
+    "scanToc": false,
+    "images": true,
+    "attachments": false,
+    "tree": false,
+    "batch": true,
+    "retryFailures": false
+  },
+  "fields": [
+    {
+      "name": "quick_start",
+      "label": "快速开始",
+      "type": "notice",
+      "markdown": "### 首次授权一次，之后一步导入\n\n- **首次使用：**选择 OAuth JSON，点击“授权 Google Docs”。若应用仍为测试状态，Chrome 中登录的账号必须已加入该 Cloud 项目的测试用户。\n- **以后导入：**只需选择 Markdown 根目录，点击“开始导入”；不必重复选择 JSON 或授权。\n\n首次使用请先按下方教程启用 Drive API、添加测试用户，并创建“桌面应用”OAuth 客户端。Pandoc 会自动下载并校验，无需用户安装；预览和单篇测试均为可选操作。"
+    },
+    {
+      "name": "oauth_client",
+      "label": "Google OAuth 桌面客户端 JSON",
+      "type": "file",
+      "arg": "--oauth-client",
+      "required": true,
+      "history": "path",
+      "placeholder": "不会上传；授权令牌保存在插件私有目录",
+      "actions": ["login"]
+    },
+    {
+      "name": "source_dir",
+      "label": "Markdown 根目录（自动扫描子目录）",
+      "type": "directory",
+      "arg": "--source-dir",
+      "required": true,
+      "history": "path",
+      "actions": ["plan", "importOne", "import"]
+    },
+    {
+      "name": "source_file",
+      "label": "单篇测试文件（可选）",
+      "type": "file",
+      "arg": "--source-file",
+      "history": "path",
+      "advanced": true,
+      "actions": ["importOne"]
+    },
+    {
+      "name": "max_import",
+      "label": "最多导入数量（0 为全部）",
+      "type": "number",
+      "arg": "--max-import",
+      "default": 0,
+      "min": 0,
+      "advanced": true,
+      "actions": ["import"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "login",
+      "kind": "login",
+      "label": "授权 Google Docs",
+      "script": "../../backend/import_google_docs.py",
+      "args": ["--login"],
+      "includeSelection": false,
+      "track": false,
+      "secondary": true
+    },
+    {
+      "id": "plan",
+      "kind": "plan",
+      "label": "预览文件数量（可选）",
+      "script": "../../backend/import_google_docs.py",
+      "args": ["--scan-source"],
+      "includeSelection": false,
+      "track": false,
+      "secondary": true
+    },
+    {
+      "id": "importOne",
+      "kind": "import",
+      "label": "先测试一篇（可选）",
+      "script": "../../backend/import_google_docs.py",
+      "args": ["--import-one", "--yes"],
+      "confirm": "将在 Google Drive 真实创建一份测试文档，且不会自动删除。确认继续？",
+      "secondary": true
+    },
+    {
+      "id": "import",
+      "kind": "import",
+      "label": "开始导入",
+      "script": "../../backend/import_google_docs.py",
+      "args": ["--import-all", "--yes", "--progress-every", "1"],
+      "confirm": "将在 Google Drive 批量创建文档；同一源文件的相同结果会自动跳过。确认继续？",
+      "progressTitle": "Google Docs Markdown 导入",
+      "progressDetail": "正在将 Markdown 转换为 DOCX 并创建 Google 文档..."
+    }
+  ]
+}

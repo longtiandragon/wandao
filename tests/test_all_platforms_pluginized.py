@@ -15,6 +15,7 @@ EXPECTED_PLUGINS = {
     "csdn": {"csdn-export"},
     "dingtalk": {"dingtalk-export", "dingtalk-import"},
     "feishu": {"feishu-export", "feishu-import"},
+    "google_docs": {"google-docs-import"},
     "ima": {"ima-export", "ima-import"},
     "notion": {"notion"},
     "obsidian": {"obsidian-export"},
